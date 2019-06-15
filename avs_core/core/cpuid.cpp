@@ -19,9 +19,23 @@
 //	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include <avs/cpuid.h>
+#include <avs/config.h>
+#include <stdint.h>
 #include <intrin.h>
 
 #define IS_BIT_SET(bitfield, bit) ((bitfield) & (1<<(bit)) ? true : false)
+
+static uint32_t get_xcr0()
+{
+    uint32_t xcr0;
+    // _XCR_XFEATURE_ENABLED_MASK: 0
+#if defined(GCC)
+    __asm__("xgetbv" : "=a" (xcr0) : "c" (0) : "%edx");
+#else
+    xcr0 = (uint32_t)_xgetbv(0);
+#endif
+    return xcr0;
+}
 
 static int CPUCheckForExtensions()
 {
@@ -45,32 +59,74 @@ static int CPUCheckForExtensions()
     result |= CPUF_SSE4_1;
   if (IS_BIT_SET(cpuinfo[2], 20))
     result |= CPUF_SSE4_2;
-
+  if (IS_BIT_SET(cpuinfo[2], 22))
+    result |= CPUF_MOVBE;
+  if (IS_BIT_SET(cpuinfo[2], 23))
+    result |= CPUF_POPCNT;
+  if (IS_BIT_SET(cpuinfo[2], 25))
+    result |= CPUF_AES;
+  if (IS_BIT_SET(cpuinfo[2], 29))
+    result |= CPUF_F16C;
   // AVX
-#if (_MSC_FULL_VER >= 160040219)    // We require VC++2010 SP1 at least
   bool xgetbv_supported = IS_BIT_SET(cpuinfo[2], 27);
   bool avx_supported = IS_BIT_SET(cpuinfo[2], 28);
   if (xgetbv_supported && avx_supported)
   {
-    if ((_xgetbv(_XCR_XFEATURE_ENABLED_MASK) & 0x6ull) == 0x6ull)
-      result |= CPUF_AVX;   
+    uint32_t xgetbv0_32 = get_xcr0();
+    if ((xgetbv0_32 & 0x6u) == 0x6u) {
+      result |= CPUF_AVX;
+      if (IS_BIT_SET(cpuinfo[2], 12))
+        result |= CPUF_FMA3;
+      __cpuid(cpuinfo, 7);
+      if (IS_BIT_SET(cpuinfo[1], 5))
+        result |= CPUF_AVX2;
+    }
+    if((xgetbv0_32 & (0x7u << 5)) && // OPMASK: upper-256 enabled by OS
+       (xgetbv0_32 & (0x3u << 1))) { // XMM/YMM enabled by OS
+      // Verify that XCR0[7:5] = ‘111b’ (OPMASK state, upper 256-bit of ZMM0-ZMM15 and
+      // ZMM16-ZMM31 state are enabled by OS)
+      /// and that XCR0[2:1] = ‘11b’ (XMM state and YMM state are enabled by OS).
+      __cpuid(cpuinfo, 7);
+      if (IS_BIT_SET(cpuinfo[1], 16))
+        result |= CPUF_AVX512F;
+      if (IS_BIT_SET(cpuinfo[1], 17))
+        result |= CPUF_AVX512DQ;
+      if (IS_BIT_SET(cpuinfo[1], 21))
+        result |= CPUF_AVX512IFMA;
+      if (IS_BIT_SET(cpuinfo[1], 26))
+        result |= CPUF_AVX512PF;
+      if (IS_BIT_SET(cpuinfo[1], 27))
+        result |= CPUF_AVX512ER;
+      if (IS_BIT_SET(cpuinfo[1], 28))
+        result |= CPUF_AVX512CD;
+      if (IS_BIT_SET(cpuinfo[1], 30))
+        result |= CPUF_AVX512BW;
+      if (IS_BIT_SET(cpuinfo[1], 31))
+        result |= CPUF_AVX512VL;
+      if (IS_BIT_SET(cpuinfo[2], 1)) // [2]!
+        result |= CPUF_AVX512VBMI;
+    }
   }
-#endif
 
-  // 3DNow!, 3DNow!, and ISSE
+  // 3DNow!, 3DNow!, ISSE, FMA4
   __cpuid(cpuinfo, 0x80000000);   
-  if (cpuinfo[0] >= 0x80000001) 
+  if (cpuinfo[0] >= 0x80000001)
   {
-    __cpuid(cpuinfo, 0x80000001);   
-   
+    __cpuid(cpuinfo, 0x80000001);
+
     if (IS_BIT_SET(cpuinfo[3], 31))
-      result |= CPUF_3DNOW;   
-   
+      result |= CPUF_3DNOW;
+
     if (IS_BIT_SET(cpuinfo[3], 30))
-      result |= CPUF_3DNOW_EXT;   
-   
+      result |= CPUF_3DNOW_EXT;
+
     if (IS_BIT_SET(cpuinfo[3], 22))
-      result |= CPUF_INTEGER_SSE;   
+      result |= CPUF_INTEGER_SSE;
+
+    if (result & CPUF_AVX) {
+      if (IS_BIT_SET(cpuinfo[2], 16))
+        result |= CPUF_FMA4;
+    }
   }
 
   return result;

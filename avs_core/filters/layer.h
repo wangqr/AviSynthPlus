@@ -43,6 +43,7 @@
 #define __Layer_H__
 
 #include <avisynth.h>
+#include <stdint.h>
 
 
 /********************************************************************
@@ -67,6 +68,7 @@ public:
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
   
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -74,6 +76,9 @@ private:
   const PClip child1, child2;
   VideoInfo vi;
   int mask_frames;
+  int pixelsize;
+  int bits_per_pixel;
+
 };
 
 
@@ -88,6 +93,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment *env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -95,6 +101,12 @@ public:
 
 private:
   const int color, tolB, tolG, tolR;
+  uint64_t color64;
+  int tolB16, tolG16, tolR16;
+  int pixelsize;
+  int bits_per_pixel;
+  int max_pixel_value;
+
 };
 
 
@@ -105,14 +117,19 @@ class ResetMask : public GenericVideoFilter
 **/
 {
 public:
-  ResetMask(PClip _child, IScriptEnvironment* env);
+  ResetMask(PClip _child, float _mask_f, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
+
+private:
+    float mask_f;
+    int mask;
 };
 
 
@@ -127,6 +144,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -135,6 +153,10 @@ private:
   int mask;
   bool doB, doG, doR, doA;
   bool doY, doU, doV;
+
+  unsigned __int64 mask64;
+  int pixelsize;
+  int bits_per_pixel; // 8,10..16
 };
 
 
@@ -149,13 +171,21 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
   static AVSValue __cdecl Create(AVSValue args, void* channel, IScriptEnvironment* env);
 private:
-  const int channel;
+  int channel;
   const int input_type;
+  const int pixelsize;
+  const int bits_per_pixel;
+  bool input_type_is_planar_rgb;
+  bool input_type_is_planar_rgba;
+  bool input_type_is_yuv;
+  bool input_type_is_yuva;
+  bool input_type_is_planar;
 };
 
 
@@ -172,6 +202,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -192,7 +223,7 @@ class Layer: public IClip
 { 
 public:
   Layer( PClip _child1, PClip _child2, const char _op[], int _lev, int _x, int _y, 
-         int _t, bool _chroma, IScriptEnvironment* env );
+         int _t, bool _chroma, float _strength, int _placement, IScriptEnvironment* env );
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   inline virtual void __stdcall GetAudio(void* buf, __int64 start, __int64 count, IScriptEnvironment* env) 
@@ -203,6 +234,7 @@ public:
     { return child1->GetParity(n); }
   
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -212,10 +244,14 @@ private:
   const PClip child1, child2;
   VideoInfo vi;
   const  char* Op;
-  const int levelB, T;
+  int levelB, ThresholdParam;
   int ydest, xdest, ysrc, xsrc, ofsX, ofsY, ycount, xcount, overlay_frames;
   const bool chroma;
-
+  bool hasAlpha;
+  int bits_per_pixel;
+  float opacity; // like in "Overlay"
+  int placement; // PLACEMENT_MPEG1 or PLACEMENT_MPEG2
+  float ThresholdParam_f;
 };
 
 
@@ -237,6 +273,7 @@ public:
     { return child1->GetParity(n); }
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
   
@@ -248,7 +285,9 @@ private:
 
 // Common to all instances
   static bool DiffFlag;
-  static BYTE Diff[513];
+  static BYTE LUT_Diff8[513];
+  int pixelsize;
+  int bits_per_pixel;
 
 };
 

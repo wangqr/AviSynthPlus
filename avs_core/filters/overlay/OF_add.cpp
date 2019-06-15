@@ -36,144 +36,189 @@
 
 #include "overlayfunctions.h"
 
-void OL_AddImage::BlendImageMask(Image444* base, Image444* overlay, Image444* mask) {
-  BYTE* baseY = base->GetPtr(PLANAR_Y);
-  BYTE* baseU = base->GetPtr(PLANAR_U);
-  BYTE* baseV = base->GetPtr(PLANAR_V);
+#include <stdint.h>
+#include <type_traits>
 
-  BYTE* ovY = overlay->GetPtr(PLANAR_Y);
-  BYTE* ovU = overlay->GetPtr(PLANAR_U);
-  BYTE* ovV = overlay->GetPtr(PLANAR_V);
-
-  BYTE* maskY = mask->GetPtr(PLANAR_Y);
-  BYTE* maskU = mask->GetPtr(PLANAR_U);
-  BYTE* maskV = mask->GetPtr(PLANAR_V);
-  int w = base->w();
-  int h = base->h();
-  if (opacity == 256) {
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        int Y = baseY[x] + ((ovY[x]*maskY[x])>>8);
-        int U = baseU[x] + (((128*(256-maskU[x]))+(maskU[x]*(ovU[x])))>>8) - 128;
-        int V = baseV[x] + (((128*(256-maskV[x]))+(maskV[x]*(ovV[x])))>>8) - 128;
-        if (Y>255) {  // Apply overbrightness to UV
-          int multiplier = max(0,288-Y);  // 0 to 32
-          U = ((U*multiplier) + (128*(32-multiplier)))>>5;
-          V = ((V*multiplier) + (128*(32-multiplier)))>>5;
-          Y = 255;
-        }
-        baseU[x] = (BYTE)clamp(U, 0, 255);
-        baseV[x] = (BYTE)clamp(V, 0, 255);
-        baseY[x] = (BYTE)Y;
-      }
-      maskY += mask->pitch;
-      maskU += mask->pitch;
-      maskV += mask->pitch;
-
-      baseY += base->pitch;
-      baseU += base->pitch;
-      baseV += base->pitch;
-
-      ovY += overlay->pitch;
-      ovU += overlay->pitch;
-      ovV += overlay->pitch;
-
-    }
-  } else {
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        int Y = baseY[x] + (((maskY[x]*opacity*ovY[x])>>16));
-        int mU = (maskU[x] * opacity)>>8;
-        int mV = (maskV[x] * opacity)>>8;
-        int U = baseU[x] + (((128*(256-mU))+(mU*(ovU[x])))>>8) - 128;
-        int V = baseV[x] + (((128*(256-mV))+(mV*(ovV[x])))>>8) - 128;
-
-        if (Y>255) {  // Apply overbrightness to UV
-          int multiplier = max(0,288-Y);  // 0 to 32
-          U = ((U*multiplier) + (128*(32-multiplier)))>>5;
-          V = ((V*multiplier) + (128*(32-multiplier)))>>5;
-          Y = 255;
-        }
-        baseU[x] = (BYTE)clamp(U, 0, 255);
-        baseV[x] = (BYTE)clamp(V, 0, 255);
-        baseY[x] = (BYTE)Y;
-      }
-      baseY += base->pitch;
-      baseU += base->pitch;
-      baseV += base->pitch;
-
-      ovY += overlay->pitch;
-      ovU += overlay->pitch;
-      ovV += overlay->pitch;
-
-      maskY += mask->pitch;
-      maskU += mask->pitch;
-      maskV += mask->pitch;
-    }
+void OL_AddImage::DoBlendImageMask(ImageOverlayInternal* base, ImageOverlayInternal* overlay, ImageOverlayInternal* mask) {
+  if(of_mode == OF_Add) {
+    if (bits_per_pixel == 8)
+      BlendImageMask<uint8_t, true, true>(base, overlay, mask);
+    else if(bits_per_pixel <= 16)
+      BlendImageMask<uint16_t, true, true>(base, overlay, mask);
+    //else if(bits_per_pixel == 32)
+    //  BlendImageMask<float>(base, overlay, mask);
   }
-  
+  else {
+    // OF_Subtract
+    if (bits_per_pixel == 8)
+      BlendImageMask<uint8_t, true, false>(base, overlay, mask);
+    else if(bits_per_pixel <= 16)
+      BlendImageMask<uint16_t, true, false>(base, overlay, mask);
+    //else if(bits_per_pixel == 32)
+    //  BlendImageMask<float>(base, overlay, mask);
+  }
 }
 
-void OL_AddImage::BlendImage(Image444* base, Image444* overlay) {
-        
-  BYTE* baseY = base->GetPtr(PLANAR_Y);
-  BYTE* baseU = base->GetPtr(PLANAR_U);
-  BYTE* baseV = base->GetPtr(PLANAR_V);
+void OL_AddImage::DoBlendImage(ImageOverlayInternal* base, ImageOverlayInternal* overlay) {
+  if(of_mode == OF_Add) {
+    if (bits_per_pixel == 8)
+      BlendImageMask<uint8_t, false, true>(base, overlay, nullptr);
+    else if(bits_per_pixel <= 16)
+      BlendImageMask<uint16_t, false, true>(base, overlay, nullptr);
+    //else if(bits_per_pixel == 32)
+    //  BlendImage<float>(base, overlay);
+  }
+  else {
+    // OF_Subtract
+    if (bits_per_pixel == 8)
+      BlendImageMask<uint8_t, false, false>(base, overlay, nullptr);
+    else if(bits_per_pixel <= 16)
+      BlendImageMask<uint16_t, false, false>(base, overlay, nullptr);
+    //else if(bits_per_pixel == 32)
+    //  BlendImage<float>(base, overlay);
+  }
+}
 
-  BYTE* ovY = overlay->GetPtr(PLANAR_Y);
-  BYTE* ovU = overlay->GetPtr(PLANAR_U);
-  BYTE* ovV = overlay->GetPtr(PLANAR_V);
-  
+template<typename pixel_t, bool maskMode, bool of_add>
+void OL_AddImage::BlendImageMask(ImageOverlayInternal* base, ImageOverlayInternal* overlay, ImageOverlayInternal* mask) {
+
+  pixel_t* baseY = reinterpret_cast<pixel_t *>(base->GetPtr(PLANAR_Y));
+  pixel_t* baseU = reinterpret_cast<pixel_t *>(base->GetPtr(PLANAR_U));
+  pixel_t* baseV = reinterpret_cast<pixel_t *>(base->GetPtr(PLANAR_V));
+
+  pixel_t* ovY = reinterpret_cast<pixel_t *>(overlay->GetPtr(PLANAR_Y));
+  pixel_t* ovU = reinterpret_cast<pixel_t *>(overlay->GetPtr(PLANAR_U));
+  pixel_t* ovV = reinterpret_cast<pixel_t *>(overlay->GetPtr(PLANAR_V));
+
+  pixel_t* maskY = maskMode ? reinterpret_cast<pixel_t *>(mask->GetPtr(PLANAR_Y)) : nullptr;
+  pixel_t* maskU = maskMode ? reinterpret_cast<pixel_t *>(mask->GetPtr(PLANAR_U)) : nullptr;
+  pixel_t* maskV = maskMode ? reinterpret_cast<pixel_t *>(mask->GetPtr(PLANAR_V)) : nullptr;
+
+  const int half_pixel_value = (sizeof(pixel_t) == 1) ? 128 : (1 << (bits_per_pixel - 1));
+  const int max_pixel_value = (sizeof(pixel_t) == 1) ? 255 : (1 << bits_per_pixel) - 1;
+  const int pixel_range = max_pixel_value + 1;
+  const int SHIFT  = (sizeof(pixel_t) == 1) ? 5 : 5 + (bits_per_pixel - 8);
+  const int MASK_CORR_SHIFT = (sizeof(pixel_t) == 1) ? 8 : bits_per_pixel;
+  const int OPACITY_SHIFT  = 8; // opacity always max 0..256
+  const int over32 = (1 << SHIFT); // 32
+  const int basepitch = (base->pitch) / sizeof(pixel_t);
+  const int overlaypitch = (overlay->pitch) / sizeof(pixel_t);
+  const int maskpitch = maskMode ? (mask->pitch) / sizeof(pixel_t) : 0;
+
+  // avoid "uint16*uint16 can't get into int32" overflows
+  typedef typename std::conditional < sizeof(pixel_t) == 1, int, typename std::conditional < sizeof(pixel_t) == 2, __int64, float>::type >::type result_t;
+
   int w = base->w();
   int h = base->h();
   if (opacity == 256) {
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
-        int Y = baseY[x] + ovY[x];
-        int U = baseU[x] + ovU[x] - 128;
-        int V = baseV[x] + ovV[x] - 128;
-        if (Y>255) {  // Apply overbrightness to UV
-          int multiplier = max(0,288-Y);  // 0 to 32
-          U = ((U*multiplier) + (128*(32-multiplier)))>>5;
-          V = ((V*multiplier) + (128*(32-multiplier)))>>5;
-          Y = 255;
+        int Y, U, V;
+        if (of_add) {
+          Y = baseY[x] + (maskMode ? (((result_t)ovY[x] * maskY[x]) >> MASK_CORR_SHIFT) : ovY[x]);
+          U = baseU[x] + (int)(maskMode ? ((((result_t)half_pixel_value*(pixel_range - maskU[x])) + ((result_t)maskU[x] * ovU[x])) >> MASK_CORR_SHIFT) : ovU[x]) - half_pixel_value;
+          V = baseV[x] + (int)(maskMode ? ((((result_t)half_pixel_value*(pixel_range - maskV[x])) + ((result_t)maskV[x] * ovV[x])) >> MASK_CORR_SHIFT) : ovV[x]) - half_pixel_value;
+          if (Y>max_pixel_value) {  // Apply overbrightness to UV
+            int multiplier = max(0,pixel_range + over32 -Y);  // 0 to 32
+            U = ((U*(         multiplier)) + (half_pixel_value*(over32-multiplier)))>>SHIFT;
+            V = ((V*(         multiplier)) + (half_pixel_value*(over32-multiplier)))>>SHIFT;
+            Y = max_pixel_value;
+          }
         }
-        baseU[x] = (BYTE)clamp(U, 0, 255);
-        baseV[x] = (BYTE)clamp(V, 0, 255);
-        baseY[x] = (BYTE)Y;
+        else {
+          // of_subtract
+          Y = baseY[x] - (maskMode ? (((result_t)ovY[x] * maskY[x]) >> MASK_CORR_SHIFT) : ovY[x]);
+          U = baseU[x] - (int)(maskMode ? ((((result_t)half_pixel_value*(pixel_range - maskU[x])) + ((result_t)maskU[x] * ovU[x])) >> MASK_CORR_SHIFT) : ovU[x]) + half_pixel_value;
+          V = baseV[x] - (int)(maskMode ? ((((result_t)half_pixel_value*(pixel_range - maskV[x])) + ((result_t)maskV[x] * ovV[x])) >> MASK_CORR_SHIFT) : ovV[x]) + half_pixel_value;
+          if (Y<0) {  // Apply superdark to UV
+            int multiplier = min(-Y,over32);  // 0 to 32
+            U = ((U*(over32 - multiplier)) + (half_pixel_value*(       multiplier)))>>SHIFT;
+            V = ((V*(over32 - multiplier)) + (half_pixel_value*(       multiplier)))>>SHIFT;
+            Y = 0;
+          }
+        }
+        baseU[x] = (pixel_t)clamp(U, 0, max_pixel_value);
+        baseV[x] = (pixel_t)clamp(V, 0, max_pixel_value);
+        baseY[x] = (pixel_t)Y;
       }
-      baseY += base->pitch;
-      baseU += base->pitch;
-      baseV += base->pitch;
+      baseY += basepitch;
+      baseU += basepitch;
+      baseV += basepitch;
 
-      ovY += overlay->pitch;
-      ovU += overlay->pitch;
-      ovV += overlay->pitch;
+      ovY += overlaypitch;
+      ovU += overlaypitch;
+      ovV += overlaypitch;
 
+      if(maskMode) {
+        maskY += maskpitch;
+        maskU += maskpitch;
+        maskV += maskpitch;
+      }
     }
   } else {
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
-        int Y = baseY[x] + ((opacity*ovY[x])>>8);
-        int U = baseU[x] + (((128*inv_opacity)+(opacity*(ovU[x])))>>8) - 128;
-        int V = baseV[x] + (((128*inv_opacity)+(opacity*(ovV[x])))>>8) - 128;
-        if (Y>255) {  // Apply overbrightness to UV
-          int multiplier = max(0,288-Y);  // 0 to 32
-          U = ((U*multiplier) + (128*(32-multiplier)))>>5;
-          V = ((V*multiplier) + (128*(32-multiplier)))>>5;
-          Y = 255;
+        int Y, U, V;
+        if(of_add)
+          Y = baseY[x] + (maskMode ? (((result_t)maskY[x] * opacity*ovY[x]) >> (OPACITY_SHIFT + MASK_CORR_SHIFT)) : ((opacity*ovY[x]) >> OPACITY_SHIFT));
+        else
+          Y = baseY[x] - (maskMode ? (((result_t)maskY[x] * opacity*ovY[x]) >> (OPACITY_SHIFT + MASK_CORR_SHIFT)) : ((opacity*ovY[x]) >> OPACITY_SHIFT));
+        if (maskMode) {
+          result_t mU = (maskU[x] * opacity) >> OPACITY_SHIFT;
+          result_t mV = (maskV[x] * opacity) >> OPACITY_SHIFT;
+          if(of_add) {
+            U = baseU[x] + (int)(((half_pixel_value*(pixel_range - mU)) + (mU*ovU[x])) >> MASK_CORR_SHIFT) - half_pixel_value;
+            V = baseV[x] + (int)(((half_pixel_value*(pixel_range - mV)) + (mV*ovV[x])) >> MASK_CORR_SHIFT) - half_pixel_value;
+          }
+          else {
+            U = baseU[x] - (int)(((half_pixel_value*(pixel_range - mU)) + (mU*ovU[x])) >> MASK_CORR_SHIFT) + half_pixel_value;
+            V = baseV[x] - (int)(((half_pixel_value*(pixel_range - mV)) + (mV*ovV[x])) >> MASK_CORR_SHIFT) + half_pixel_value;
+          }
         }
-        baseU[x] = (BYTE)clamp(U, 0, 255);
-        baseV[x] = (BYTE)clamp(V, 0, 255);
-        baseY[x] = (BYTE)Y;
+        else {
+          if(of_add) {
+            U = baseU[x] + (((half_pixel_value*inv_opacity)+(opacity*(ovU[x])))>>OPACITY_SHIFT) - half_pixel_value;
+            V = baseV[x] + (((half_pixel_value*inv_opacity)+(opacity*(ovV[x])))>>OPACITY_SHIFT) - half_pixel_value;
+          }
+          else {
+            U = baseU[x] - (((half_pixel_value*inv_opacity)+(opacity*(ovU[x])))>>OPACITY_SHIFT) + half_pixel_value;
+            V = baseV[x] - (((half_pixel_value*inv_opacity)+(opacity*(ovV[x])))>>OPACITY_SHIFT) + half_pixel_value;
+          }
+        }
+        if(of_add) {
+          if (Y>max_pixel_value) {  // Apply overbrightness to UV
+            int multiplier = max(0,(max_pixel_value + 1) + over32 - Y);  // 288-Y : 0 to 32
+            U = ((U*multiplier) + (half_pixel_value*(over32 - multiplier))) >> SHIFT;
+            V = ((V*multiplier) + (half_pixel_value*(over32 - multiplier))) >> SHIFT;
+            Y = max_pixel_value;
+          }
+        }
+        else {
+          // of_subtract
+          if (Y<0) {  // Apply overbrightness to UV
+            int multiplier = min(-Y,over32);  // 0 to 32
+            U = ((U*(over32 - multiplier)) + (half_pixel_value*(       multiplier)))>>SHIFT;
+            V = ((V*(over32 - multiplier)) + (half_pixel_value*(       multiplier)))>>SHIFT;
+            Y = 0;
+          }
+        }
+        baseU[x] = (pixel_t)clamp(U, 0, max_pixel_value);
+        baseV[x] = (pixel_t)clamp(V, 0, max_pixel_value);
+        baseY[x] = (pixel_t)Y;
       }
-      baseY += base->pitch;
-      baseU += base->pitch;
-      baseV += base->pitch;
+      baseY += basepitch;
+      baseU += basepitch;
+      baseV += basepitch;
 
-      ovY += overlay->pitch;
-      ovU += overlay->pitch;
-      ovV += overlay->pitch;
+      ovY += overlaypitch;
+      ovU += overlaypitch;
+      ovV += overlaypitch;
+
+      if(maskMode) {
+        maskY += maskpitch;
+        maskU += maskpitch;
+        maskV += maskpitch;
+      }
     }
   }
 }

@@ -38,6 +38,8 @@
 #include <avs/minmax.h>
 #include "../core/bitblt.h"
 #include "../core/internal.h"
+#include "merge.h"
+#include <cmath>
 
 
 
@@ -532,13 +534,13 @@ PVideoFrame __stdcall ChangeFPS::GetFrame(int n, IScriptEnvironment* env)
 
 bool __stdcall ChangeFPS::GetParity(int n)
 {
-  return child->GetParity( int((n * a) / b) ); // Use Floor!
+  return child->GetParity(int((n * a) / b)); // Use Floor!
 }
 
 
 AVSValue __cdecl ChangeFPS::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
-  return new ChangeFPS( args[0].AsClip(), args[1].AsInt(), args[2].AsInt(1), args[3].AsBool(true), env);
+  return new ChangeFPS(args[0].AsClip(), args[1].AsInt(), args[2].AsInt(1), args[3].AsBool(true), env);
 }
 
 
@@ -546,8 +548,8 @@ AVSValue __cdecl ChangeFPS::CreateFloat(AVSValue args, void*, IScriptEnvironment
 {
   uint32_t num, den;
 
-	FloatToFPS("ChangeFPS", args[1].AsFloatf(), num, den, env);
-	return new ChangeFPS(args[0].AsClip(), num, den, args[2].AsBool(true), env);
+  FloatToFPS("ChangeFPS", args[1].AsFloatf(), num, den, env);
+  return new ChangeFPS(args[0].AsClip(), num, den, args[2].AsBool(true), env);
 }
 
 // Tritical Jan 2006
@@ -555,8 +557,8 @@ AVSValue __cdecl ChangeFPS::CreatePreset(AVSValue args, void*, IScriptEnvironmen
 {
   uint32_t num, den;
 
-	PresetToFPS("ChangeFPS", args[1].AsString(), num, den, env);
-	return new ChangeFPS(args[0].AsClip(), num, den, args[2].AsBool(true), env);
+  PresetToFPS("ChangeFPS", args[1].AsString(), num, den, env);
+  return new ChangeFPS(args[0].AsClip(), num, den, args[2].AsBool(true), env);
 }
 
 AVSValue __cdecl ChangeFPS::CreateFromClip(AVSValue args, void*, IScriptEnvironment* env)
@@ -567,8 +569,8 @@ AVSValue __cdecl ChangeFPS::CreateFromClip(AVSValue args, void*, IScriptEnvironm
     env->ThrowError("ChangeFPS: The clip supplied to get the FPS from must contain video.");
   }
 
-  return new ChangeFPS( args[0].AsClip(), vi.fps_numerator, vi.fps_denominator,
-                        args[2].AsBool(true), env);
+  return new ChangeFPS(args[0].AsClip(), vi.fps_numerator, vi.fps_denominator,
+    args[2].AsBool(true), env);
 }
 
 
@@ -581,30 +583,30 @@ AVSValue __cdecl ChangeFPS::CreateFromClip(AVSValue args, void*, IScriptEnvironm
  *******   ConvertFPS Filters   ******
  *************************************/
 
-ConvertFPS::ConvertFPS( PClip _child, unsigned new_numerator, unsigned new_denominator, int _zone,
-                        int _vbi, IScriptEnvironment* env )
-	: GenericVideoFilter(_child), zone(_zone), vbi(_vbi), lps(0)
+ConvertFPS::ConvertFPS(PClip _child, unsigned new_numerator, unsigned new_denominator, int _zone,
+  int _vbi, IScriptEnvironment* env)
+  : GenericVideoFilter(_child), zone(_zone), vbi(_vbi), lps(0)
 {
   if (zone >= 0 && !vi.IsYUY2()) // Tritical Jan 2006
-   env->ThrowError("ConvertFPS: zone >= 0 requires YUY2 input");
+    env->ThrowError("ConvertFPS: zone >= 0 requires YUY2 input");
 
   fa = int64_t(vi.fps_numerator) * new_denominator;
   fb = int64_t(vi.fps_denominator) * new_numerator;
-  if( zone >= 0 )
+  if (zone >= 0)
   {
-    if( vbi < 0 ) vbi = 0;
-    if( vbi > vi.height ) vbi = vi.height;
-    lps = int( (vi.height + vbi) * fb / fa );
-    if( zone > lps )
+    if (vbi < 0) vbi = 0;
+    if (vbi > vi.height) vbi = vi.height;
+    lps = int((vi.height + vbi) * fb / fa);
+    if (zone > lps)
       env->ThrowError("ConvertFPS: 'zone' too large. Maximum allowed %d", lps);
   }
-  else if( 3*fb < (fa<<1) ) {
+  else if (3 * fb < (fa << 1)) {
     int dec = MulDiv(vi.fps_numerator, 20000, vi.fps_denominator);
     env->ThrowError("ConvertFPS: New frame rate too small. Must be greater than %d.%04d "
-                    "Increase or use 'zone='", dec/30000, (dec/3)%10000);
+      "Increase or use 'zone='", dec / 30000, (dec / 3) % 10000);
   }
   vi.SetFPS(new_numerator, new_denominator);
-  const int64_t num_frames = (vi.num_frames * fb + (fa>>1)) / fa;
+  const int64_t num_frames = (vi.num_frames * fb + (fa >> 1)) / fa;
   if (num_frames > 0x7FFFFFFF)  // MAXINT
     env->ThrowError("ConvertFPS: Maximum number of frames exceeded.");
 
@@ -614,55 +616,64 @@ ConvertFPS::ConvertFPS( PClip _child, unsigned new_numerator, unsigned new_denom
 
 PVideoFrame __stdcall ConvertFPS::GetFrame(int n, IScriptEnvironment* env)
 {
-	static const int resolution =10; //bits. Must be >= 4, or modify next line
-	static const int threshold  = 1<<(resolution-4);
-	static const int one        = 1<<resolution;
-	static const int half       = 1<<(resolution-1);
+  // Using int64 modulo instead of modf, for double holds only 53 bits
+  // n*fa worst-like case: (60000/1001 <> 30000/1001)
+  // n = 0x7FFFFFFF; // 31 bits
+  // fa = 1001 * 60000ULL // 26 bits
+  // summa 57 bits, too much, modf((double)n * fa / fb, &nsrc_f); is not enough
+  int64_t modulo = (n * fa) % fb; 
+  double frac_f = (double)modulo / fb;
+  int nsrc = int(n * fa / fb);
 
-	int nsrc      = int( n * fa / fb );
-	int frac      = int( (((n*fa) % fb) << resolution) / fb );
+  if (zone < 0) {
 
-	if( zone < 0 ) {
+    // Mode 1: Blend full frames
+ 
+    constexpr double threshold_f = 1.0 / 16.0; 
+    // was: 1 << (resolution - 4); // 64/1024
+    
+    // Don't bother if the blend ratio is small
+    if (frac_f < threshold_f)
+      return child->GetFrame(nsrc, env);
 
-   	// Mode 1: Blend full frames
-		int mix_ratio = frac;
+    if (frac_f > 1.0 - threshold_f)
+      return child->GetFrame(nsrc + 1, env);
 
-		// Don't bother if the blend ratio is small
-		if( mix_ratio < threshold )
-			return child->GetFrame(nsrc, env);
+    PVideoFrame a = child->GetFrame(nsrc, env);
+    PVideoFrame b = child->GetFrame(nsrc + 1, env);
 
-		if( mix_ratio > (one - threshold) )
-			return child->GetFrame(nsrc+1, env);
+    env->MakeWritable(&a);
 
-		PVideoFrame a = child->GetFrame(nsrc, env);
-		PVideoFrame b = child->GetFrame(nsrc+1, env);
+    const int planes_y[4] = { PLANAR_Y, PLANAR_U, PLANAR_V, PLANAR_A };
+    const int planes_r[4] = { PLANAR_G, PLANAR_B, PLANAR_R, PLANAR_A };
+    const int *planes;
 
-		env->MakeWritable(&a);
+    int planeCount;
+    planeCount = vi.IsPlanar() ? vi.NumComponents() : 1;
+    planes = (!vi.IsPlanar() || vi.IsYUV() || vi.IsYUVA()) ? planes_y : planes_r;
 
-        // All pixel formats -- Tritical Jan 2006
-		int plane[3] = { PLANAR_Y, PLANAR_U, PLANAR_V };
-		int stop = vi.IsPlanar() ? 3 : 1;
-		for (int j=0; j<stop; ++j)
-		{
-			const BYTE*  b_data   = b->GetReadPtr(plane[j]);
-			int          b_pitch  = b->GetPitch(plane[j]);
-			BYTE*        a_data   = a->GetWritePtr(plane[j]);
-			int          a_pitch  = a->GetPitch(plane[j]);
-			int          row_size = a->GetRowSize(plane[j]);
-			int          height   = a->GetHeight(plane[j]);
+    const int bits_per_pixel = vi.BitsPerComponent();
+    for (int j = 0; j < planeCount; ++j)
+    {
+      const int plane = planes[j];
+      const BYTE*  b_data = b->GetReadPtr(plane);
+      int          b_pitch = b->GetPitch(plane);
+      BYTE*        a_data = a->GetWritePtr(plane);
+      int          a_pitch = a->GetPitch(plane);
+      int          row_size = a->GetRowSize(plane);
+      int          height = a->GetHeight(plane);
 
-// :FIXME: Use fast plane blend routine from Merge here
+      int weight_i;
+      int invweight_i;
+      float weight = (float)frac_f; // between 0 and 1.0
+      MergeFuncPtr weighted_merge_planar = getMergeFunc(bits_per_pixel, env->GetCPUFlags(), a_data, b_data, weight, /*out*/weight_i, /*out*/invweight_i);
+      weighted_merge_planar(a_data, b_data, a_pitch, b_pitch, row_size, height, weight, weight_i, invweight_i);
+    }
 
-			for (int y = 0; y < height; y++) {
-				for (int x = 0; x < row_size; x++)
-					a_data[x] = a_data[x] + BYTE(((b_data[x] - a_data[x]) * mix_ratio + half) >> resolution);
-				a_data += a_pitch;
-				b_data += b_pitch;
-			}
-		}
-		return a;
+    return a;
 
-	} else {
+  }
+  else {
 	// Mode 2: Switch to next frame at the scan line corresponding to the source frame's timing.
 	// If zone > 0, perform a gradual transition, i.e. blend one frame into the next
 	// over the given number of lines.
@@ -679,7 +690,7 @@ PVideoFrame __stdcall ConvertFPS::GetFrame(int n, IScriptEnvironment* env)
 		const BYTE *pa, *pb, *a_data = a->GetReadPtr();
 		int   a_pitch = a->GetPitch();
 
-		int switch_line = (lps * (one - frac)) >> resolution;
+		int switch_line = (int)(lps * (1.0 - frac_f));
 		int top = switch_line - (zone>>1);
 		int bottom = switch_line + (zone>>1) - lps;
 		if( bottom > 0 && nsrc > 0 ) {

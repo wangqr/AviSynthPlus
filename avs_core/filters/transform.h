@@ -61,6 +61,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -78,6 +79,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -95,6 +97,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -103,6 +106,8 @@ public:
 private:
   /*const*/ int left_bytes, top, align;
   int xsub, ysub;
+  bool isRGBPfamily;
+  bool hasAlpha;
 };
 
 
@@ -117,6 +122,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -134,8 +140,8 @@ private:
 
 /**** Factory methods ****/
 
-static AVSValue __cdecl Create_Letterbox(AVSValue args, void*, IScriptEnvironment* env);
-static AVSValue __cdecl Create_CropBottom(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue __cdecl Create_Letterbox(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue __cdecl Create_CropBottom(AVSValue args, void*, IScriptEnvironment* env);
 
 
 

@@ -143,7 +143,9 @@ AVSValue __cdecl ConvertAudio::Create_24bit(AVSValue args, void*, IScriptEnviron
 }
 
 
+#if defined(X86_32) && defined(MSVC) && !defined(__clang__)
 void FilterUD_mmx(short *Xp, unsigned Ph, int _inc, int _dhb, short *p_Imp, unsigned End);
+#endif
 
 
 /*************************************
@@ -286,7 +288,7 @@ void __stdcall EnsureVBRMP3Sync::GetAudio(void* buf, __int64 start, __int64 coun
 
 
 int __stdcall EnsureVBRMP3Sync::SetCacheHints(int cachehints, int frame_range) {
-
+  AVS_UNUSED(frame_range);
   // Enable CACHE_AUDIO on parent cache and juice it up to 1Mb
 
   switch (cachehints) {
@@ -302,7 +304,7 @@ int __stdcall EnsureVBRMP3Sync::SetCacheHints(int cachehints, int frame_range) {
   return 0;
 }
 
-AVSValue __cdecl EnsureVBRMP3Sync::Create(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue __cdecl EnsureVBRMP3Sync::Create(AVSValue args, void*, IScriptEnvironment*) {
   return new EnsureVBRMP3Sync(args[0].AsClip());
 }
 
@@ -644,7 +646,7 @@ void DelayAudio::GetAudio(void* buf, __int64 start, __int64 count, IScriptEnviro
 }
 
 
-AVSValue __cdecl DelayAudio::Create(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue __cdecl DelayAudio::Create(AVSValue args, void*, IScriptEnvironment*) {
   return new DelayAudio(args[1].AsFloat(), args[0].AsClip());
 }
 
@@ -790,7 +792,7 @@ saturate1:
 }
 
 
-AVSValue __cdecl Amplify::Create(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue __cdecl Amplify::Create(AVSValue args, void*, IScriptEnvironment*) {
   if (!args[0].AsClip()->GetVideoInfo().AudioChannels())
     return args[0];
   AVSValue args_c = args[1];
@@ -808,7 +810,7 @@ AVSValue __cdecl Amplify::Create(AVSValue args, void*, IScriptEnvironment* env) 
 
 
 
-AVSValue __cdecl Amplify::Create_dB(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue __cdecl Amplify::Create_dB(AVSValue args, void*, IScriptEnvironment*) {
   if (!args[0].AsClip()->GetVideoInfo().AudioChannels())
     return args[0];
   AVSValue args_c = args[1];
@@ -1045,7 +1047,7 @@ PVideoFrame __stdcall Normalize::GetFrame(int n, IScriptEnvironment* env) {
 }
 
 
-AVSValue __cdecl Normalize::Create(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue __cdecl Normalize::Create(AVSValue args, void*, IScriptEnvironment*) {
 
   return new Normalize(args[0].AsClip(), args[1].AsFloatf(1.0f), args[2].AsBool(false));}
 
@@ -1169,7 +1171,7 @@ AVSValue __cdecl MixAudio::Create(AVSValue args, void*, IScriptEnvironment* env)
 static int Amasktab[Amask+1];
 static SFLOAT fAmasktab[Amask+1];
 
-ResampleAudio::ResampleAudio(PClip _child, int _target_rate_n, int _target_rate_d, IScriptEnvironment* env)
+ResampleAudio::ResampleAudio(PClip _child, int _target_rate_n, int _target_rate_d, IScriptEnvironment*)
     : GenericVideoFilter(ConvertAudio::Create(_child, SAMPLE_INT16 | SAMPLE_FLOAT, SAMPLE_FLOAT)),
       factor(_target_rate_n / (double(_target_rate_d) * vi.audio_samples_per_second))
 {
@@ -1296,7 +1298,7 @@ void __stdcall ResampleAudio::GetAudio(void* buf, __int64 start, __int64 count, 
 
 	short* dst_end = &dst[count * ch];
 
-#if defined(X86_32) && defined(MSVC)
+#if defined(X86_32) && defined(MSVC_PURE)
 	if (env->GetCPUFlags() & CPUF_MMX)
   {
 	  static const int r_Na     = 1 << (Na-1);
@@ -1465,7 +1467,8 @@ AVSValue __cdecl ResampleAudio::Create(AVSValue args, void*, IScriptEnvironment*
 }
 
 
-#if defined(X86_32) && defined(MSVC)
+#if defined(X86_32) && defined(MSVC_PURE)
+
 // FilterUD MMX SAMPLE_INT16 Version -- approx 3.25 times faster than original (2.4x than new)
 /*
  * MMx registers transfered across calls

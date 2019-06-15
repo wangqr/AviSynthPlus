@@ -43,36 +43,45 @@
 /********************************************************************
 # Build Hints for DirectShow SDK
 
-# Hints for Avisynth+, Visual Studio 2015
+# Hints for Avisynth+, Visual Studio 2019
 
-- download and install Microsoft Windows SDK for Windows 7 and .NET Framework 3.5 SP1
-  https://www.microsoft.com/en-us/download/details.aspx?id=3138
+- download and install 7.1 SDK
+  Microsoft Windows SDK for Windows 7 and .NET Framework 4 
+    https://www.microsoft.com/en-us/download/details.aspx?id=8279
+  
+  In case of problems:
+  https://social.msdn.microsoft.com/Forums/vstudio/en-US/1de7c9b4-1feb-4c98-b426-f7f02cbafa99/windows-sdk-71-on-windows-10
+  Uninstall VC2010 redist, download offline ISO image installer, install
+
 - [Building strmbase.lib]
   - Open solution in
-    c:\Program Files\Microsoft SDKs\Windows\v7.0\Samples\multimedia\directshow\baseclasses\
-    It will be converted.
+      c:\Program Files\Microsoft SDKs\Windows\v7.1A\Samples\multimedia\directshow\baseclasses\
+    (or replace v7.1A with appropriate v7 SDK folder)
+    Project is of old format, will be converted.
   - Compile for targets Release_MBCS x86 and x64. 
     Find compiled library strmbase.lib in 
-      c:\Program Files\Microsoft SDKs\Windows\v7.0\Samples\multimedia\directshow\baseclasses\Release_MBCS\;
+      c:\Program Files\Microsoft SDKs\Windows\v7.1A\Samples\multimedia\directshow\baseclasses\Release_MBCS\;
     and
-      c:\Program Files\Microsoft SDKs\Windows\v7.0\Samples\multimedia\directshow\baseclasses\x64\Release_MBCS\;
+      c:\Program Files\Microsoft SDKs\Windows\v7.1A\Samples\multimedia\directshow\baseclasses\x64\Release_MBCS\;
 - [Building DirectShowSource.dll]
   - Open PluginDirectShowSource project in the AviSynth plus solution
+  - Note: Usually Avisynth+ CMake is configuring the settings below properly.
   - Edit Project Properties|VC++ Directories|Include Paths
     Add to the beginning
-    c:\Program Files\Microsoft SDKs\Windows\v7.0\Samples\multimedia\directshow\baseclasses\;
-    c:\Program Files\Microsoft SDKs\Windows\v7.0\Include\;
+    c:\Program Files\Microsoft SDKs\Windows\v7.1A\Samples\multimedia\directshow\baseclasses\;
+    c:\Program Files\Microsoft SDKs\Windows\v7.1A\Include\; or put behind $(VC_IncludePath) if windows.h not found
   - Edit Project Properties|VC++ Directories|Library Directories
     For x86 target add 
-      c:\Program Files\Microsoft SDKs\Windows\v7.0\Samples\multimedia\directshow\baseclasses\Release_MBCS\;
+      c:\Program Files\Microsoft SDKs\Windows\v7.1A\Samples\multimedia\directshow\baseclasses\Release_MBCS\;
     For x64 target add 
-      c:\Program Files\Microsoft SDKs\Windows\v7.0\Samples\multimedia\directshow\baseclasses\x64\Release_MBCS\;
+      c:\Program Files\Microsoft SDKs\Windows\v7.1A\Samples\multimedia\directshow\baseclasses\x64\Release_MBCS\;
     For XP target add (to find winmm.lib)
-      c:\Program Files (x86)\Microsoft SDKs\Windows\v7.1A\Lib\;
+      c:\Program Files (x86)\Microsoft SDKs\Windows\v7.1A\Lib\; (for 32 bit build)
+      c:\Program Files (x86)\Microsoft SDKs\Windows\v7.1A\Lib\x64\; (for 64 bit build)
   - Edit Project Properties|Linker|Input|Additional Dependencies
     Add strmbase.lib to the list
   - For XP compatibility
-    - choose Platform Toolset v140_xp and 
+    - choose Platform Toolset v141_xp 
     - Edit Project Properties|C/C++|Command Line
       Add
       /Zc:threadSafeInit-
@@ -252,6 +261,7 @@ class GetSample : public IBaseFilter, public IPin, public IMemInputPin {
   bool end_of_stream, flushing, seeking;
   IUnknown *m_pPos;  // Pointer to the CPosPassThru object.
   VideoInfo vi;
+  bool m_bInvertFrames; // Data in av_buffer is flipped vertically compared to the expected orientation of vi.pixel_type
   bool lockvi; // Format negotiation is allowed until DSS is fully created
 
   HANDLE evtDoneWithSample, evtNewSampleReady;
@@ -266,7 +276,7 @@ class GetSample : public IBaseFilter, public IPin, public IMemInputPin {
   AM_MEDIA_TYPE *am_media_type;
 
   unsigned media, no_my_media_types;
-  AM_MEDIA_TYPE *my_media_types[16]; // 2.6
+  AM_MEDIA_TYPE *my_media_types[18]; // 2.6
 
   PVideoFrame pvf;
 
@@ -286,7 +296,9 @@ public:
     mediaYV24   = 1<<10,// 2.6
     mediaI420   = 1<<11,// 2.6
     mediaNV12   = 1<<12,// 2.6
-    mediaRGB    = mediaARGB | mediaRGB32 | mediaRGB24,
+    mediaRGB64  = 1<<13,
+    mediaRGB48  = 1<<14,
+    mediaRGB    = mediaARGB | mediaRGB32 | mediaRGB24 | mediaRGB64 | mediaRGB48,
     mediaYUV    = mediaYUV9 | mediaYV12 | mediaYUY2 | mediaAYUV | mediaY411 | mediaY41P,
     mediaYUVex  = mediaYUV  | mediaYV16 | mediaYV24 | mediaI420 | mediaNV12,
     mediaAUTO   = mediaRGB | mediaYUV,
@@ -386,7 +398,8 @@ public:
   HRESULT __stdcall ReceiveCanBlock();
 
 private:
-  HRESULT InternalQueryAccept(const AM_MEDIA_TYPE* pmt, VideoInfo &vi);
+  /// \param bInvertFrames[out] If true, the image is flipped vertically compared to the expected orientation of vi.pixel_type
+  HRESULT InternalQueryAccept(const AM_MEDIA_TYPE* pmt, VideoInfo &vi, bool &bInvertFrames);
 
 };
 

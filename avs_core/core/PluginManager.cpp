@@ -5,14 +5,22 @@
 #include "strings.h"
 #include "InternalEnvironment.h"
 #include <cassert>
+#include <imagehlp.h>
 
 typedef const char* (__stdcall *AvisynthPluginInit3Func)(IScriptEnvironment* env, const AVS_Linkage* const vectors);
 typedef const char* (__stdcall *AvisynthPluginInit2Func)(IScriptEnvironment* env);
 typedef const char* (AVSC_CC *AvisynthCPluginInitFunc)(AVS_ScriptEnvironment* env);
 
 const char RegAvisynthKey[] = "Software\\Avisynth";
+#if defined (__GNUC__)
+const char RegPluginDirPlus_GCC[] = "PluginDir+GCC";
+#if defined(X86_32)
+  #define GCC_WIN32
+#endif
+#else
 const char RegPluginDirClassic[] = "PluginDir2_5";
 const char RegPluginDirPlus[] = "PluginDir+";
+#endif
 
 /*
 ---------------------------------------------------------------------------------
@@ -81,7 +89,10 @@ static std::string GetFullPathNameWrap(const std::string &f)
 
 static bool IsParameterTypeSpecifier(char c) {
   switch (c) {
-    case 'b': case 'i': case 'f': case 's': case 'c': case '.':
+  case 'b': case 'i': case 'f': case 's': case 'c': case '.':
+#ifdef NEW_AVSVALUE
+  case 'a': // Arrays as function parameters
+#endif
       return true;
     default:
       return false;
@@ -225,12 +236,50 @@ bool AVSFunction::empty() const
 
 bool AVSFunction::IsScriptFunction() const
 {
-    return ( (apply == &(ScriptFunction::Execute))
+#ifdef DEBUG_GSCRIPTCLIP_MT
+  /*
+  if (!strcmp(this->name, "YPlaneMax"))
+    return true;
+  if (!strcmp(this->name, "YPlaneMin"))
+    return true;
+  if (!strcmp(this->name, "LumaDifference"))
+    return true;
+    */
+/*
+  if (!stricmp(this->name, "yplanemax"))
+    return true;
+  if (!stricmp(this->name, "yplanemin"))
+    return true;
+  if (!stricmp(this->name, "lumadifference"))
+    return true;
+  */
+  //if (!stricmp(this->name, "srestore_inside_1"))
+  //  return true;
+#endif
+  return ( (apply == &(ScriptFunction::Execute))
 		  || (apply == &Eval)
           || (apply == &EvalOop)
           || (apply == &Import)
         );
 }
+
+#ifdef DEBUG_GSCRIPTCLIP_MT
+bool AVSFunction::IsRuntimeScriptFunction() const
+{
+
+  if (!strcmp(this->name, "YPlaneMax"))
+  return true;
+  if (!strcmp(this->name, "YPlaneMin"))
+  return true;
+  if (!strcmp(this->name, "LumaDifference"))
+  return true;
+
+  //if (!stricmp(this->name, "srestore_inside_1"))
+  //  return true;
+
+  return (apply == &(ScriptFunction::Execute));
+}
+#endif
 
 bool AVSFunction::SingleTypeMatch(char type, const AVSValue& arg, bool strict) {
   switch (type) {
@@ -240,6 +289,9 @@ bool AVSFunction::SingleTypeMatch(char type, const AVSValue& arg, bool strict) {
     case 'f': return arg.IsFloat() && (!strict || !arg.IsInt());
     case 's': return arg.IsString();
     case 'c': return arg.IsClip();
+#ifdef NEW_AVSVALUE
+    case 'a': return arg.IsArray(); // PF 161028 AVS+ script arrays
+#endif
     default:  return false;
   }
 }
@@ -248,6 +300,19 @@ bool AVSFunction::TypeMatch(const char* param_types, const AVSValue* args, size_
 
   bool optional = false;
 
+  /*
+  { "StackHorizontal", BUILTIN_FUNC_PREFIX, "cc+", StackHorizontal::Create },
+  { "Spline", BUILTIN_FUNC_PREFIX, "[x]ff+[cubic]b", Spline },
+  { "Select",   BUILTIN_FUNC_PREFIX, "i.+", Select },
+  { "Array", BUILTIN_FUNC_PREFIX, ".#", ArrayCreate },  // # instead of +: creates script array
+
+  { "IsArray",   BUILTIN_FUNC_PREFIX, ".", IsArray },
+  { "ArrayGet",  BUILTIN_FUNC_PREFIX, "ai", ArrayGet },
+  { "ArrayGet",  BUILTIN_FUNC_PREFIX, "as", ArrayGet },
+  { "ArraySize", BUILTIN_FUNC_PREFIX, "a", ArraySize },
+  */
+  // arguments are provided in a flattened way (flattened=array elements extracted)
+  // e.g.    string array is provided here string,string,string
   size_t i = 0;
   while (i < num_args) {
 
@@ -278,6 +343,9 @@ bool AVSFunction::TypeMatch(const char* param_types, const AVSValue* args, size_
 
     switch (*param_types) {
       case 'b': case 'i': case 'f': case 's': case 'c':
+#ifdef NEW_AVSVALUE
+      case 'a': // PF Arrays
+#endif
         if (   (!optional || args[i].Defined())
             && !SingleTypeMatch(*param_types, args[i], strict))
           return false;
@@ -287,6 +355,21 @@ bool AVSFunction::TypeMatch(const char* param_types, const AVSValue* args, size_
         ++i;
         break;
       case '+': case '*':
+#ifdef NEW_AVSVALUE
+        if (param_types[-1] != '.' && args[i].IsArray()) { // PF new Arrays
+          // all elements in the array should match with the type char preceding '+*'
+          // only one array level is enough
+          for (int j = 0; j < args[i].ArraySize(); j++)
+          {
+            if (!SingleTypeMatch(param_types[-1], args[i][j], strict))
+              return false;
+          }
+          // we're done with the + or *
+          ++param_types;
+          ++i;
+        }
+        else
+#endif
         if (!SingleTypeMatch(param_types[-1], args[i], strict)) {
           // we're done with the + or *
           ++param_types;
@@ -439,6 +522,12 @@ void PluginManager::AddAutoloadDir(const std::string &dirPath, bool toFront)
   replace_beginning(dir, "PROGRAMDIR", ExeFileDir);
 
   std::string plugin_dir;
+#if defined (__GNUC__)
+  if (GetRegString(HKEY_CURRENT_USER, RegAvisynthKey, RegPluginDirPlus_GCC, &plugin_dir))
+    replace_beginning(dir, "USER_PLUS_PLUGINS", plugin_dir);
+  if (GetRegString(HKEY_LOCAL_MACHINE, RegAvisynthKey, RegPluginDirPlus_GCC, &plugin_dir))
+    replace_beginning(dir, "MACHINE_PLUS_PLUGINS", plugin_dir);
+#else
   if (GetRegString(HKEY_CURRENT_USER, RegAvisynthKey, RegPluginDirPlus, &plugin_dir))
     replace_beginning(dir, "USER_PLUS_PLUGINS", plugin_dir);
   if (GetRegString(HKEY_LOCAL_MACHINE, RegAvisynthKey, RegPluginDirPlus, &plugin_dir))
@@ -447,12 +536,13 @@ void PluginManager::AddAutoloadDir(const std::string &dirPath, bool toFront)
     replace_beginning(dir, "USER_CLASSIC_PLUGINS", plugin_dir);
   if (GetRegString(HKEY_LOCAL_MACHINE, RegAvisynthKey, RegPluginDirClassic, &plugin_dir))
     replace_beginning(dir, "MACHINE_CLASSIC_PLUGINS", plugin_dir);
+#endif
 
   // replace backslashes with forward slashes
   replace(dir, '\\', '/');
 
   // append terminating slash if needed
-  if (dir[dir.size()-1] != '/')
+  if (dir.size() > 0 && dir[dir.size()-1] != '/')
     dir.append("/");
 
   // remove double slashes
@@ -622,6 +712,25 @@ bool PluginManager::LoadPlugin(const char* path, bool throwOnError, AVSValue *re
   return LoadPlugin(pf, throwOnError, result);
 }
 
+static bool Is64BitDLL(std::string sDLL, bool &bIs64BitDLL)
+{
+  bIs64BitDLL = false;
+  LOADED_IMAGE li;
+
+  if (!MapAndLoad((LPSTR)sDLL.c_str(), NULL, &li, TRUE, TRUE))
+  {
+    //error handling (check GetLastError())
+    return false;
+  }
+
+  if (li.FileHeader->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) //64 bit image
+    bIs64BitDLL = true;
+
+  UnMapAndLoad(&li);
+
+  return true;
+}
+
 bool PluginManager::LoadPlugin(PluginFile &plugin, bool throwOnError, AVSValue *result)
 {
   std::vector<PluginFile>& PluginList = Autoloading ? AutoLoadedPlugins : LoadedPlugins;
@@ -645,9 +754,21 @@ bool PluginManager::LoadPlugin(PluginFile &plugin, bool throwOnError, AVSValue *
   plugin.Library = LoadLibraryEx(plugin.FilePath.c_str(), 0, LOAD_WITH_ALTERED_SEARCH_PATH);
   if (plugin.Library == NULL)
   {
+    DWORD errCode = GetLastError();
+
+    // Bitness mixing always throws an error, regardless of throwOnError state
+    // By this new behaviour even plugin auto-load will fail
+    bool bIs64BitDLL;
+    bool succ = Is64BitDLL(plugin.FilePath, bIs64BitDLL);
+    if (succ) {
+      const bool selfIs32 = sizeof(void *) == 4;
+      if (selfIs32 && bIs64BitDLL)
+        Env->ThrowError("Cannot load a 64 bit DLL in 32 bit Avisynth: '%s'.\n", plugin.FilePath.c_str());
+      if (!selfIs32 && !bIs64BitDLL)
+        Env->ThrowError("Cannot load a 32 bit DLL in 64 bit Avisynth: '%s'.\n", plugin.FilePath.c_str());
+    }
     if (throwOnError)
     {
-      DWORD errCode = GetLastError();
       Env->ThrowError("Cannot load file '%s'. Platform returned code %d:\n%s", plugin.FilePath.c_str(), errCode, GetLastErrorText(errCode).c_str());
     }
     else
@@ -747,7 +868,8 @@ void PluginManager::AddFunction(const char* name, const char* params, IScriptEnv
   else
   {
       newFunc = new AVSFunction(name, NULL, params, apply, user_data, NULL);
-      assert(newFunc->IsScriptFunction());
+      if(apply != &create_c_video_filter)
+        assert(newFunc->IsScriptFunction());
   }
 
   // Warn user if a function with the same name is already registered by another plugin
@@ -791,10 +913,15 @@ std::string PluginManager::PluginLoading() const
 bool PluginManager::TryAsAvs26(PluginFile &plugin, AVSValue *result)
 {
   extern const AVS_Linkage* const AVS_linkage; // In interface.cpp
-
+#ifdef GCC_WIN32
+  AvisynthPluginInit3Func AvisynthPluginInit3 = (AvisynthPluginInit3Func)GetProcAddress(plugin.Library, "_AvisynthPluginInit3");
+  if (!AvisynthPluginInit3)
+    AvisynthPluginInit3 = (AvisynthPluginInit3Func)GetProcAddress(plugin.Library, "AvisynthPluginInit3@8");
+#else
   AvisynthPluginInit3Func AvisynthPluginInit3 = (AvisynthPluginInit3Func)GetProcAddress(plugin.Library, "AvisynthPluginInit3");
   if (!AvisynthPluginInit3)
     AvisynthPluginInit3 = (AvisynthPluginInit3Func)GetProcAddress(plugin.Library, "_AvisynthPluginInit3@8");
+#endif
 
   if (AvisynthPluginInit3 == NULL)
     return false;
@@ -810,9 +937,15 @@ bool PluginManager::TryAsAvs26(PluginFile &plugin, AVSValue *result)
 
 bool PluginManager::TryAsAvs25(PluginFile &plugin, AVSValue *result)
 {
+#ifdef GCC_WIN32
+  AvisynthPluginInit2Func AvisynthPluginInit2 = (AvisynthPluginInit2Func)GetProcAddress(plugin.Library, "_AvisynthPluginInit2");
+  if (!AvisynthPluginInit2)
+    AvisynthPluginInit2 = (AvisynthPluginInit2Func)GetProcAddress(plugin.Library, "AvisynthPluginInit2@4");
+#else
   AvisynthPluginInit2Func AvisynthPluginInit2 = (AvisynthPluginInit2Func)GetProcAddress(plugin.Library, "AvisynthPluginInit2");
   if (!AvisynthPluginInit2)
     AvisynthPluginInit2 = (AvisynthPluginInit2Func)GetProcAddress(plugin.Library, "_AvisynthPluginInit2@4");
+#endif
 
   if (AvisynthPluginInit2 == NULL)
     return false;
@@ -918,7 +1051,7 @@ bool PluginManager::TryAsAvsC(PluginFile &plugin, AVSValue *result)
 ---------------------------------------------------------------------------------
 */
 
-AVSValue LoadPlugin(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue LoadPlugin(AVSValue args, void*, IScriptEnvironment* env)
 {
   IScriptEnvironment2 *env2 = static_cast<IScriptEnvironment2*>(env);
 

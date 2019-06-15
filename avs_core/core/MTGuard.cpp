@@ -210,6 +210,7 @@ bool __stdcall MTGuard::GetParity(int n)
 
 int __stdcall MTGuard::SetCacheHints(int cachehints, int frame_range)
 {
+  AVS_UNUSED(frame_range);
   if (CACHE_GET_MTMODE == cachehints) {
     return MT_NICE_FILTER;
   }
@@ -253,6 +254,8 @@ PClip MTGuard::Create(MtMode mode, PClip filterInstance, std::unique_ptr<const F
     }
 }
 
+#ifdef USE_MT_GUARDEXIT
+// 170531 Optimizing concept introduced in r2069 temporarily disabled by this define
 
 // ---------------------------------------------------------------------
 //                      MTGuardExit
@@ -280,8 +283,9 @@ private:
     T *mutex_;
 };
 
-MTGuardExit::MTGuardExit(const PClip &clip) :
-    NonCachedGenericVideoFilter(clip)
+MTGuardExit::MTGuardExit(const PClip &clip, const char *_name) :
+    NonCachedGenericVideoFilter(clip),
+  name(_name)
 {}
 
 void MTGuardExit::Activate(PClip &with_guard)
@@ -293,8 +297,23 @@ void MTGuardExit::Activate(PClip &with_guard)
 PVideoFrame __stdcall MTGuardExit::GetFrame(int n, IScriptEnvironment* env)
 {
     std::mutex *m = (nullptr == guard) ? nullptr : guard->GetMutex();
+#ifdef DEBUG
+    if(nullptr != guard)
+      _RPT3(0, "MTGuardExit::GetFrame %d name=%s (before unlock ) thread=%d\n", n, name.c_str(), GetCurrentThreadId());
+#endif
     reverse_lock<std::mutex> unlock_guard(m);
-    return child->GetFrame(n, env);
+#ifdef DEBUG
+    if (nullptr != guard)
+      _RPT3(0, "MTGuardExit::GetFrame %d name=%s (unlock ok     ) thread=%d\n", n, name.c_str(), GetCurrentThreadId());
+#endif
+    PVideoFrame result = child->GetFrame(n, env);
+#ifdef DEBUG
+    if (nullptr != guard)
+      _RPT3(0, "MTGuardExit::GetFrame %d name=%s (lock again    ) thread=%d\n", n, name.c_str(), GetCurrentThreadId());
+#endif
+    // 170531. problem: in real life MTGuardExit unlocks and allows MT_SERIALIZED filters to be called again
+    // even if they are still in work, make them to be called in a reentant way like in NICE_FILTER mode
+    return result;
 }
 
 void __stdcall MTGuardExit::GetAudio(void* buf, __int64 start, __int64 count, IScriptEnvironment* env)
@@ -303,3 +322,4 @@ void __stdcall MTGuardExit::GetAudio(void* buf, __int64 start, __int64 count, IS
     reverse_lock<std::mutex> unlock_guard(m);
     return child->GetAudio(buf, start, count, env);
 }
+#endif

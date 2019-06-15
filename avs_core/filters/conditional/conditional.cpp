@@ -43,9 +43,11 @@
 
 extern const AVSFunction Conditional_filters[] = {
   {  "ConditionalSelect", BUILTIN_FUNC_PREFIX, "csc+[show]b", ConditionalSelect::Create },
-  {  "ConditionalFilter", BUILTIN_FUNC_PREFIX, "cccsss[show]b", ConditionalFilter::Create },
+  {  "ConditionalFilter", BUILTIN_FUNC_PREFIX, "cccsss[show]b", ConditionalFilter::Create, (void *)0 },
+  // easy syntax from GConditionalFilter, args3 and 4 to "=" and "true":
+  {  "ConditionalFilter", BUILTIN_FUNC_PREFIX, "cccs[show]b", ConditionalFilter::Create, (void *)1 },
   {  "ScriptClip",        BUILTIN_FUNC_PREFIX, "cs[show]b[after_frame]b", ScriptClip::Create },
-  {  "ConditionalReader", BUILTIN_FUNC_PREFIX, "css[show]b", ConditionalReader::Create },
+  {  "ConditionalReader", BUILTIN_FUNC_PREFIX, "css[show]b[condvarsuffix]s", ConditionalReader::Create },
   {  "FrameEvaluate",     BUILTIN_FUNC_PREFIX, "cs[show]b[after_frame]b", ScriptClip::Create_eval },
   {  "WriteFile",         BUILTIN_FUNC_PREFIX, "c[filename]ss+[append]b[flush]b", Write::Create },
   {  "WriteFileIf",       BUILTIN_FUNC_PREFIX, "c[filename]ss+[append]b[flush]b", Write::Create_If },
@@ -94,6 +96,7 @@ ConditionalSelect::~ConditionalSelect() {
 
 int __stdcall ConditionalSelect::SetCacheHints(int cachehints, int frame_range)
 {
+  AVS_UNUSED(frame_range);
   return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
 }
 
@@ -158,7 +161,7 @@ PVideoFrame __stdcall ConditionalSelect::GetFrame(int n, IScriptEnvironment* env
 }
 
 
-AVSValue __cdecl ConditionalSelect::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl ConditionalSelect::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
   int num_args = 0;
   PClip* child_array = 0;
@@ -242,6 +245,7 @@ const char* const t_FALSE="FALSE";
 
 int __stdcall ConditionalFilter::SetCacheHints(int cachehints, int frame_range)
 {
+  AVS_UNUSED(frame_range);
   return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
 }
 
@@ -400,7 +404,11 @@ void __stdcall ConditionalFilter::GetAudio(void* buf, __int64 start, __int64 cou
 
 AVSValue __cdecl ConditionalFilter::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
 {
-  return new ConditionalFilter(args[0].AsClip(), args[1].AsClip(), args[2].AsClip(), args[3], args[4], args[5], args[6].AsBool(false), env);
+  intptr_t userdata = (intptr_t)user_data;
+  if (userdata == 0)
+    return new ConditionalFilter(args[0].AsClip(), args[1].AsClip(), args[2].AsClip(), args[3], args[4], args[5], args[6].AsBool(false),env);
+  else // like GConditional filter shortcut: no "=" "true" needed
+    return new ConditionalFilter(args[0].AsClip(), args[1].AsClip(), args[2].AsClip(), args[3], "=", "true", args[4].AsBool(false), env);
 }
 
 
@@ -414,13 +422,24 @@ AVSValue __cdecl ConditionalFilter::Create(AVSValue args, void* user_data, IScri
 
 ScriptClip::ScriptClip(PClip _child, AVSValue  _script, bool _show, bool _only_eval, bool _eval_after_frame, IScriptEnvironment* env) :
   GenericVideoFilter(_child), script(_script), show(_show), only_eval(_only_eval), eval_after(_eval_after_frame) {
-
+  AVS_UNUSED(env);
 }
 
 
 int __stdcall ScriptClip::SetCacheHints(int cachehints, int frame_range)
 {
+#ifdef DEBUG_GSCRIPTCLIP_MT
+  switch (cachehints) {
+  case CACHE_DONT_CACHE_ME:
+    return 1;
+  case CACHE_GET_MTMODE:
+    return MT_NICE_FILTER;
+  default:
+    return 0;
+  }
+#else
   return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
+#endif
 }
 
 PVideoFrame __stdcall ScriptClip::GetFrame(int n, IScriptEnvironment* env) {
@@ -506,12 +525,12 @@ PVideoFrame __stdcall ScriptClip::GetFrame(int n, IScriptEnvironment* env) {
 }
 
 
-AVSValue __cdecl ScriptClip::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl ScriptClip::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
   return new ScriptClip(args[0].AsClip(), args[1], args[2].AsBool(false),false, args[3].AsBool(false), env);
 }
 
 
-AVSValue __cdecl ScriptClip::Create_eval(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl ScriptClip::Create_eval(AVSValue args, void* , IScriptEnvironment* env)
 {
   return new ScriptClip(args[0].AsClip(), args[1], args[2].AsBool(false),true, args[3].AsBool(false), env);}

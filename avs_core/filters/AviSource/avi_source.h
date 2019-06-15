@@ -45,17 +45,31 @@ class TemporalBuffer {
   BYTE* pY;
   BYTE* pV;
   BYTE* pU;
+  BYTE* pA;
   int pitchY;
   int pitchUV;
   size_t size;
 public:
-  TemporalBuffer(const VideoInfo& vi, bool bMediaPad, IScriptEnvironment* env);
+  TemporalBuffer(const VideoInfo& vi, bool bMediaPad, 
+    bool b64a, bool b48r, bool v210,
+    bool P010, bool P016, bool P210, bool P216, bool v410, bool Y416,
+    bool r210, bool R10k,
+    IScriptEnvironment* env);
   ~TemporalBuffer() {}
-  int GetPitch(int plane=PLANAR_Y) { return (plane == PLANAR_Y) ? pitchY : pitchUV; }
+  int GetPitch(int plane=PLANAR_Y) { 
+    return (plane == PLANAR_Y || plane == PLANAR_G || plane == PLANAR_B || plane == PLANAR_R || plane == PLANAR_A) ? pitchY : pitchUV; }
   size_t GetSize() { return size; }
   BYTE* GetPtr(int plane=PLANAR_Y)
   {
-    switch (plane) { case PLANAR_U: return pU; case PLANAR_V: return pV; default: return pY; }
+    switch (plane) { 
+    case PLANAR_U: return pU; 
+    case PLANAR_V: return pV; 
+    case PLANAR_G: return pY;
+    case PLANAR_B: return pU;
+    case PLANAR_R: return pV;
+    case PLANAR_A: return pA;
+    default: return pY;
+    }
   }
 };
 
@@ -74,6 +88,19 @@ class AVISource : public IClip {
   bool bIsType1;
   bool bInvertFrames;
   bool bMediaPad;
+  bool P010;
+  bool P016;
+  bool v210;
+  bool P210;
+  bool P216;
+  bool v410;
+  bool Y416;
+  bool r210;
+  bool R10k;
+  bool b64a;
+  bool b48r;
+
+  bool utf8;
 
   PVideoFrame last_frame;
   int last_frame_no;
@@ -99,7 +126,7 @@ public:
   } avi_mode_e;
 
   AVISource(const char filename[], bool fAudio, const char pixel_type[],
-            const char fourCC[], int vtrack, int atrack, avi_mode_e mode, IScriptEnvironment* env);  // mode: 0=detect, 1=avifile, 2=opendml, 3=avifile (audio only)
+            const char fourCC[], int vtrack, int atrack, avi_mode_e mode, bool utf8, IScriptEnvironment* env);  // mode: 0=detect, 1=avifile, 2=opendml, 3=avifile (audio only)
   ~AVISource();
   void CleanUp(); // Tritical - Jan 2006
   const VideoInfo& __stdcall GetVideoInfo();
@@ -115,10 +142,11 @@ public:
     const char* fourCC = (mode != MODE_WAV) ? args[3].AsString("") : "";
     const int vtrack = args[4].AsInt(0);
     const int atrack = args[5].AsInt(0);
+    const int utf8 = args[6].AsBool(false);
 
-    PClip result = new AVISource(args[0][0].AsString(), fAudio, pixel_type, fourCC, vtrack, atrack, mode, env);
+    PClip result = new AVISource(args[0][0].AsString(), fAudio, pixel_type, fourCC, vtrack, atrack, mode, utf8, env);
     for (int i=1; i<args[0].ArraySize(); ++i)
-      result = new_Splice(result, new AVISource(args[0][i].AsString(), fAudio, pixel_type, fourCC, vtrack, atrack, mode, env), false, env);
+      result = new_Splice(result, new AVISource(args[0][i].AsString(), fAudio, pixel_type, fourCC, vtrack, atrack, mode, utf8, env), false, env);
     return AlignPlanar::Create(result);
   }
 };

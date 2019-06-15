@@ -204,8 +204,9 @@ extern "C"
 int AVSC_CC avs_get_pitch_p(const AVS_VideoFrame * p, int plane)
 {
   switch (plane) {
-  case AVS_PLANAR_U: case AVS_PLANAR_V: return p->pitchUV;}
-  return p->pitch;
+  case AVS_PLANAR_U: case AVS_PLANAR_V: return p->pitchUV;
+  case AVS_PLANAR_A: return p->pitchA;}
+  return p->pitch; // Y, G, B, R
 }
 
 extern "C"
@@ -225,9 +226,19 @@ int AVSC_CC avs_get_row_size_p(const AVS_VideoFrame * p, int plane)
     else
       return 0;
 
-  case AVS_PLANAR_Y_ALIGNED:
-       r = (p->row_size+FRAME_ALIGN-1)&(~(FRAME_ALIGN-1)); // Aligned rowsize
+  case AVS_PLANAR_ALIGNED: case AVS_PLANAR_Y_ALIGNED:
+  case AVS_PLANAR_R_ALIGNED: case AVS_PLANAR_G_ALIGNED: case AVS_PLANAR_B_ALIGNED:
+    r = (p->row_size+FRAME_ALIGN-1)&(~(FRAME_ALIGN-1)); // Aligned rowsize
        return (r <= p->pitch) ? r : p->row_size;
+  case AVS_PLANAR_A:
+    return (p->pitchA) ? p->row_sizeA : 0;
+  case AVS_PLANAR_A_ALIGNED:
+    if (p->pitchA) {
+      r = (p->row_sizeA + FRAME_ALIGN - 1)&(~(FRAME_ALIGN - 1)); // Aligned rowsize
+      return (r <= p->pitchA) ? r : p->row_sizeA;
+    }
+    else
+      return 0;
   }
   return p->row_size;
 }
@@ -238,17 +249,20 @@ int AVSC_CC avs_get_height_p(const AVS_VideoFrame * p, int plane)
   switch (plane) {
   case AVS_PLANAR_U: case AVS_PLANAR_V:
     return (p->pitchUV) ? p->heightUV : 0;
+  case AVS_PLANAR_A:
+    return (p->pitchA) ? p->height : 0;
   }
-  return p->height;
+  return p->height; // Y, G, B, R, A
 }
 
 extern "C"
 const BYTE * AVSC_CC avs_get_read_ptr_p(const AVS_VideoFrame * p, int plane)
 {
   switch (plane) {
-    case AVS_PLANAR_U: return p->vfb->data + p->offsetU;
-    case AVS_PLANAR_V: return p->vfb->data + p->offsetV;
-    default:           return p->vfb->data + p->offset;}
+    case AVS_PLANAR_U: case AVS_PLANAR_B: return p->vfb->data + p->offsetU; // G is first. Then B,R order like U,V
+    case AVS_PLANAR_V: case PLANAR_R:     return p->vfb->data + p->offsetV;
+    case PLANAR_A: return p->vfb->data + p->offsetA;
+    default:           return p->vfb->data + p->offset;} // PLANAR Y, PLANAR_G
 }
 
 extern "C"
@@ -265,12 +279,13 @@ extern "C"
 BYTE * AVSC_CC avs_get_write_ptr_p(const AVS_VideoFrame * p, int plane)
 {
   switch (plane) {
-    case AVS_PLANAR_U: return p->vfb->data + p->offsetU;
-    case AVS_PLANAR_V: return p->vfb->data + p->offsetV;
+    case AVS_PLANAR_U: case AVS_PLANAR_B: return p->vfb->data + p->offsetU;
+    case AVS_PLANAR_V: case AVS_PLANAR_R: return p->vfb->data + p->offsetV;
+    case AVS_PLANAR_A: return p->vfb->data + p->offsetA;
     default:           break;
   }
   if (avs_is_writable(p)) {
-    return p->vfb->data + p->offset;
+    return p->vfb->data + p->offset; // Y,G
   }
   return 0;
 }
@@ -488,13 +503,24 @@ void AVSC_CC avs_set_to_clip(AVS_Value * v, AVS_Clip * c)
 extern "C"
 void AVSC_CC avs_copy_value(AVS_Value * dest, AVS_Value src)
 {
-	new(dest) AVSValue(*(const AVSValue *)&src);
+  // true: don't copy array elements recursively
+#ifdef NEW_AVSVALUE
+  new(dest) AVSValue(*(const AVSValue *)&src, true);
+#else
+  new(dest) AVSValue(*(const AVSValue *)&src);
+#endif
 }
 
 extern "C"
 void AVSC_CC avs_release_value(AVS_Value v)
 {
-	((AVSValue *)&v)->~AVSValue();
+#ifdef NEW_AVSVALUE
+  if (((AVSValue *)&v)->IsArray()) {
+    // signing for destructor: don't free array elements
+    ((AVSValue *)&v)->MarkArrayAsC();
+}
+#endif
+  ((AVSValue *)&v)->~AVSValue();
 }
 
 //////////////////////////////////////////////////////////////////
@@ -632,7 +658,7 @@ AVS_Value AVSC_CC avs_invoke(AVS_ScriptEnvironment * p, const char * name, AVS_V
 	AVS_Value v = {0,0};
 	p->error = 0;
 	try {
-		AVSValue v0 = p->env->Invoke(name, *(AVSValue *)&args, arg_names);
+    AVSValue v0 = p->env->Invoke(name, *(AVSValue *)&args, arg_names);
 		new ((AVSValue *)&v) AVSValue(v0);
 	} catch (const IScriptEnvironment::NotFound&) {
     p->error = "Function Not Found";

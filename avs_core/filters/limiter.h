@@ -40,10 +40,11 @@
 class Limiter : public GenericVideoFilter
 {
 public:
-    Limiter(PClip _child, int _min_luma, int _max_luma, int _min_chroma, int _max_chroma, int _show, IScriptEnvironment* env);
+    Limiter(PClip _child, float _min_luma, float _max_luma, float _min_chroma, float _max_chroma, int _show, bool paramscale, IScriptEnvironment* env);
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
     int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+      AVS_UNUSED(frame_range);
       return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
     }
 
@@ -55,8 +56,17 @@ private:
   int max_chroma;
   int min_chroma;
 
+  float max_luma_f;
+  float min_luma_f;
+  float max_chroma_f;
+  float min_chroma_f;
+
   enum show_e{show_none, show_luma, show_luma_grey, show_chroma, show_chroma_grey};
   const show_e show;
+
+  // avs+
+  int pixelsize;
+  int bits_per_pixel; // 8,10..16
 };
 
 #endif  // __Limiter_H__

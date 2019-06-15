@@ -34,6 +34,7 @@
 
 
 #include "levels.h"
+#include <float.h>
 #include "limiter.h"
 #include <cstdio>
 #include <cmath>
@@ -41,6 +42,8 @@
 #include <avs/alignment.h>
 #include "../core/internal.h"
 #include <xmmintrin.h>
+#include <algorithm>
+#include <string>
 
 #define PI 3.141592653589793
 
@@ -50,11 +53,11 @@
 ********************************************************************/
 
 extern const AVSFunction Levels_filters[] = {
-  { "Levels",    BUILTIN_FUNC_PREFIX, "cifiii[coring]b[dither]b", Levels::Create },        // src_low, gamma, src_high, dst_low, dst_high
-  { "RGBAdjust", BUILTIN_FUNC_PREFIX, "c[r]f[g]f[b]f[a]f[rb]f[gb]f[bb]f[ab]f[rg]f[gg]f[bg]f[ag]f[analyze]b[dither]b", RGBAdjust::Create },
-  { "Tweak",     BUILTIN_FUNC_PREFIX, "c[hue]f[sat]f[bright]f[cont]f[coring]b[sse]b[startHue]f[endHue]f[maxSat]f[minSat]f[interp]f[dither]b[realcalc]b", Tweak::Create },
-  { "MaskHS",    BUILTIN_FUNC_PREFIX, "c[startHue]f[endHue]f[maxSat]f[minSat]f[coring]b", MaskHS::Create },
-  { "Limiter",   BUILTIN_FUNC_PREFIX, "c[min_luma]i[max_luma]i[min_chroma]i[max_chroma]i[show]s", Limiter::Create },
+  { "Levels",    BUILTIN_FUNC_PREFIX, "cfffff[coring]b[dither]b", Levels::Create },        // src_low, gamma, src_high, dst_low, dst_high cifiii->ffffff
+  { "RGBAdjust", BUILTIN_FUNC_PREFIX, "c[r]f[g]f[b]f[a]f[rb]f[gb]f[bb]f[ab]f[rg]f[gg]f[bg]f[ag]f[analyze]b[dither]b[conditional]b[condvarsuffix]s", RGBAdjust::Create },
+  { "Tweak",     BUILTIN_FUNC_PREFIX, "c[hue]f[sat]f[bright]f[cont]f[coring]b[sse]b[startHue]f[endHue]f[maxSat]f[minSat]f[interp]f[dither]b[realcalc]b[dither_strength]f", Tweak::Create },
+  { "MaskHS",    BUILTIN_FUNC_PREFIX, "c[startHue]f[endHue]f[maxSat]f[minSat]f[coring]b[realcalc]b", MaskHS::Create },
+  { "Limiter",   BUILTIN_FUNC_PREFIX, "c[min_luma]f[max_luma]f[min_chroma]f[max_chroma]f[show]s[paramscale]b", Limiter::Create },
   { 0 }
 };
 
@@ -120,72 +123,217 @@ static void __cdecl free_buffer(void* buff, IScriptEnvironment* env)
     }
 }
 
+// Helper for Limits, MaskHS, Tweak
+static void get_limits(luma_chroma_limits_t &d, int bits_per_pixel) {
+  int tv_range_lo_luma_8 = 16;
+  int tv_range_hi_luma_8 = 235;
+  int tv_range_lo_chroma_8 = tv_range_lo_luma_8;
+  int tv_range_hi_chroma_8 = 240;
+
+  if (bits_per_pixel == 32) {
+    d.tv_range_low_luma_f = tv_range_lo_luma_8 / 255.0f;
+    d.tv_range_hi_luma_f = tv_range_hi_luma_8 / 255.0f;
+    d.full_range_low_luma_f = 0.0f;
+    d.full_range_hi_luma_f = 1.0f;
+#ifdef FLOAT_CHROMA_IS_HALF_CENTERED
+    d.middle_chroma_f = 0.5f;
+#else
+    d.middle_chroma_f = 0.0f;
+#endif
+    d.tv_range_low_chroma_f = (tv_range_lo_chroma_8 - 128) / 255.0f + d.middle_chroma_f; // -112
+    d.tv_range_hi_chroma_f = (tv_range_hi_chroma_8 - 128) / 255.0f + d.middle_chroma_f; // 112
+    d.full_range_low_chroma_f = d.middle_chroma_f - 0.5f; // -0.5..0.5 or 0..1.0
+    d.full_range_hi_chroma_f = d.middle_chroma_f + 0.5f;
+
+    d.range_luma_f = d.tv_range_hi_luma_f - d.tv_range_low_luma_f;
+    d.range_chroma_f = d.tv_range_hi_chroma_f - d.tv_range_low_chroma_f;
+  }
+  else {
+    d.tv_range_low = tv_range_lo_luma_8 << (bits_per_pixel - 8); // 16-240,64–960, 256–3852,... 4096-61692
+    d.tv_range_hi_luma = tv_range_hi_luma_8 << (bits_per_pixel - 8);
+    d.tv_range_hi_chroma = tv_range_hi_chroma_8 << (bits_per_pixel - 8);
+    d.middle_chroma = 1 << (bits_per_pixel - 1); // 128
+    d.range_luma = d.tv_range_hi_luma - d.tv_range_low; // 219
+    d.range_chroma = d.tv_range_hi_chroma - d.tv_range_low; // 224
+  }
+}
+
 /********************************
  *******   Levels Filter   ******
  ********************************/
 
-Levels::Levels(PClip _child, int in_min, double gamma, int in_max, int out_min, int out_max, bool coring, bool _dither,
+template<bool chroma, bool use_gamma>
+AVS_FORCEINLINE float Levels::calcPixel(const float pixel)
+{
+    float result;
+    if (!chroma) {
+      float p;
+      if (coring)
+        p = ((pixel - limits.tv_range_low_luma_f)*(1.0f / limits.range_luma_f) - in_min_f) / divisor_f;
+      else
+        p = (pixel - in_min_f) / divisor_f;
+
+      if(use_gamma)
+        p = (float)pow((double)clamp(p, 0.0f, 1.0f), gamma);
+
+      p = p * out_diff_f + out_min_f; // out_diff_f = out_max_f - out_min_f;
+      // luma
+      if (coring) {
+        result = clamp(p* limits.range_luma_f / 1.0f + limits.tv_range_low_luma_f, limits.tv_range_low_luma_f, limits.tv_range_hi_luma_f);
+      }
+      else
+        result = clamp(p, 0.0f, 1.0f); // todo: theoretical question, should we clamp in Levels function?
+    }
+    else {
+      /*
+      int q = (int)(((bias_dither + ii - middle_chroma * scale) * (out_max - out_min)) / divisor + middle_chroma + 0.5);
+      int chroma;
+      if (coring)
+        chroma = clamp(q, tv_range_low, tv_range_hi_chroma); // e.g. clamp(q, 16, 240)
+      else
+        chroma = clamp(q, 0, max_pixel_value); // e.g. clamp(q, 0, 255)
+      */
+      float q = ((pixel - limits.middle_chroma_f) * out_diff_f) / divisor_f + limits.middle_chroma_f;
+      if (coring)
+        result = clamp(q, limits.tv_range_low_chroma_f, limits.tv_range_hi_chroma_f); // e.g. clamp(q, 16, 240)
+      else
+        result = clamp(q, limits.full_range_low_chroma_f, limits.full_range_hi_chroma_f); // e.g. clamp(q, 0, 255) todo: theoretical question, should we clamp in Levels function?
+    }
+    return result;
+}
+
+
+Levels::Levels(PClip _child, float _in_min, double _gamma, float _in_max, float _out_min, float _out_max, bool _coring, bool _dither,
   IScriptEnvironment* env)
-  : GenericVideoFilter(_child), dither(_dither)
+  : GenericVideoFilter(_child), in_min_f(_in_min), gamma(_gamma), in_max_f(_in_max), out_min_f(_out_min), out_max_f(_out_max), coring(_coring), dither(_dither)
 {
   if (gamma <= 0.0)
     env->ThrowError("Levels: gamma must be positive");
 
   gamma = 1/gamma;
+  use_gamma = (gamma != 1.0);
 
-  int divisor = in_max - in_min + (in_max == in_min);
+  int in_min = (int)in_min_f;
+  int in_max = (int)in_max_f;
+  int out_min = (int)out_min_f;
+  int out_max = (int)out_max_f;
+  out_diff_f = out_max_f - out_min_f;
+
+  int divisor;
+  if (in_min == in_max)
+    divisor = 1;
+  else
+    divisor = in_max - in_min;
+
+  if (in_min_f == in_max_f)
+    divisor_f = 1;
+  else
+    divisor_f = in_max_f - in_min_f;
+
   int scale = 1;
-  double bias = 0.0;
+  //double bias = 0.0;
+
+  dither_strength = 1.0f; // later: from parameter as Tweak
+
+  pixelsize = vi.ComponentSize();
+  bits_per_pixel = vi.BitsPerComponent(); // 8,10..16
+
+  // No lookup for float. Only slow pixel-by-pixel realtime calculation
+
+  int lookup_size = 1 << bits_per_pixel; // 256, 1024, 4096, 16384, 65536
+  real_lookup_size = (pixelsize == 1) ? 256 : 65536; // avoids lut overflow in case of non-standard content of a 10 bit clip
+  int max_pixel_value = (1 << bits_per_pixel) - 1;
+
+  use_lut = bits_per_pixel != 32; // for float: realtime only
+
+  get_limits(limits, bits_per_pixel); // tv range limits
+
+  if (pixelsize == 4)
+    dither_strength /= 65536.0f; // same dither range as for a 16 bit clip
 
   if (dither) {
-    scale = 256;
+    // lut scale settings
+    // same 256*dither for chroma and luma
+    scale = 256; // lower 256 is dither value
     divisor *= 256;
     in_min *= 256;
-    bias = -127.5;
+    bias_dither = -(256.0f * dither_strength - 1) / 2; // -127.5 for 8 bit, scaling because of dithershift
+  }
+  else {
+    scale = 1;
+    bias_dither = 0.0f;
   }
 
-  auto env2 = static_cast<IScriptEnvironment2*>(env);
-  size_t num_map = vi.IsYUV() ? 2 : 1;
-  map = static_cast<uint8_t*>(env2->Allocate(256 * scale * num_map, 8, AVS_NORMAL_ALLOC));
-  if (!map)
-    env->ThrowError("Levels: Could not reserve memory.");
-  env->AtExit(free_buffer, map);
+  need_chroma = (vi.IsYUV() || vi.IsYUVA()) && !vi.IsY8();
+  if (vi.IsRGB())
+    coring = false; // no coring option for packed and planar RGBs
 
-  if (vi.IsYUV())
-  {
-    mapchroma = map + 256 * scale;
+  // one buffer for map and mapchroma
+  map = nullptr;
+  if (use_lut) {
+    auto env2 = static_cast<IScriptEnvironment2*>(env);
+    int number_of_maps = need_chroma ? 2 : 1;
+    int bufsize = pixelsize * real_lookup_size * scale * number_of_maps;
+    map = static_cast<uint8_t*>(env2->Allocate(bufsize, 16, AVS_NORMAL_ALLOC));
+    if (!map)
+      env->ThrowError("Levels: Could not reserve memory.");
+    env->AtExit(free_buffer, map);
+    if (bits_per_pixel > 8 && bits_per_pixel < 16) // make lut table safe for 10-14 bit garbage
+      std::fill_n(map, bufsize, 0); // 8 and 16 bit is safe
 
-    for (int i = 0; i<256*scale; ++i) {
+    if(need_chroma)
+      mapchroma = map + pixelsize * real_lookup_size * scale; // pointer offset
+    
+    for (int i = 0; i < lookup_size*scale; ++i) {
       double p;
 
-      if (coring)
-        p = ((bias + i - 16*scale)*(255.0/219.0) - in_min) / divisor;
+      int ii;
+      if (dither)
+        ii = (i & 0xFFFFFF00) + (int)((i & 0xFF)*dither_strength);
       else
-        p = (bias + i - in_min) / divisor;
+        ii = i;
+
+      if (coring)
+        p = ((bias_dither + ii - limits.tv_range_low *scale)*((double)max_pixel_value / limits.range_luma) - in_min) / divisor;
+      else
+        p = (bias_dither + ii - in_min) / divisor;
 
       p = pow(clamp(p, 0.0, 1.0), gamma);
       p = p * (out_max - out_min) + out_min;
-
+      int luma;
       if (coring)
-        map[i] = (BYTE)clamp(int(p*(219.0/255.0)+16.5), 16, 235);
+        luma = clamp(int(p*((double)limits.range_luma / max_pixel_value) + limits.tv_range_low + 0.5), limits.tv_range_low, limits.tv_range_hi_luma);
       else
-        map[i] = (BYTE)clamp(int(p+0.5), 0, 255);
+        luma = clamp(int(p + 0.5), 0, max_pixel_value);
 
-      BYTE q = BYTE(((bias + i - 128*scale) * (out_max-out_min)) / divisor + 128.5);
+      if (pixelsize == 1)
+        map[i] = (BYTE)luma;
+      else // pixelsize==2
+        reinterpret_cast<uint16_t *>(map)[i] = (uint16_t)luma;
 
-      if (coring)
-        mapchroma[i] = (BYTE)clamp((int)q, 16, 240);
-      else
-        mapchroma[i] = (BYTE)clamp((int)q, 0, 255);
+      if (need_chroma) {
+        int q = (int)(((bias_dither + ii - limits.middle_chroma*scale) * (out_max - out_min)) / divisor + limits.middle_chroma + 0.5f);
+        int chroma;
+        if (coring)
+          chroma = clamp(q, limits.tv_range_low, limits.tv_range_hi_chroma); // e.g. clamp(q, 16, 240)
+        else
+          chroma = clamp(q, 0, max_pixel_value); // e.g. clamp(q, 0, 255)
+        if (pixelsize == 1)
+          mapchroma[i] = (BYTE)chroma;
+        else // pixelsize==2
+          reinterpret_cast<uint16_t *>(mapchroma)[i] = (uint16_t)chroma;
+      }
     }
   }
-  else if (vi.IsRGB())
-  {
-    for (int i = 0; i<256*scale; ++i) {
-      double p = (bias + i - in_min) / divisor;
-      p = pow(clamp(p, 0.0, 1.0), gamma);
-      p = p * (out_max - out_min) + out_min;
-      map[i] = (BYTE)clamp(int(p+0.5), 0, 255);
+  else {
+    // precalc float dither table from integer one
+    if (dither) {
+      for (int y = 0; y <= 15; y++)
+        for (int x = 0; x <= 15; x++) {
+          int index = (y << 4) | x; // 0..255
+          ditherMap_f[index] = (ditherMap[index] / 255.0f - 0.5f) * dither_strength;
+          // float dithering is 16 bit granularity, dither_strength is 1/65536.0 and not a parameter yet
+        }
     }
   }
 }
@@ -197,108 +345,454 @@ PVideoFrame __stdcall Levels::GetFrame(int n, IScriptEnvironment* env)
   env->MakeWritable(&frame);
   BYTE* p = frame->GetWritePtr();
   const int pitch = frame->GetPitch();
-  if (dither) {
-    if (vi.IsYUY2()) {
-      const int UVwidth = vi.width/2;
-      for (int y = 0; y<vi.height; ++y) {
-        const int _y = (y << 4) & 0xf0;
-        for (int x = 0; x<vi.width; ++x) {
-          p[x*2] = map[p[x*2]<<8 | ditherMap[(x&0x0f)|_y]];
+
+  if (use_lut) {
+    if (dither) {
+      if (vi.IsYUY2()) {
+        const int UVwidth = vi.width / 2;
+        for (int y = 0; y < vi.height; ++y) {
+          const int _y = (y << 4) & 0xf0;
+          for (int x = 0; x < vi.width; ++x) {
+            p[x * 2] = map[p[x * 2] << 8 | ditherMap[(x & 0x0f) | _y]];
+          }
+          for (int z = 0; z < UVwidth; ++z) {
+            const int _dither = ditherMap[(z & 0x0f) | _y];
+            p[z * 4 + 1] = mapchroma[p[z * 4 + 1] << 8 | _dither];
+            p[z * 4 + 3] = mapchroma[p[z * 4 + 3] << 8 | _dither];
+          }
+          p += pitch;
         }
-        for (int z = 0; z<UVwidth; ++z) {
-          const int _dither = ditherMap[(z&0x0f)|_y];
-          p[z*4+1] = mapchroma[p[z*4+1]<<8 | _dither];
-          p[z*4+3] = mapchroma[p[z*4+3]<<8 | _dither];
-        }
-        p += pitch;
       }
-    } else if (vi.IsPlanar()) {
-      for (int y = 0; y<vi.height; ++y) {
-        const int _y = (y << 4) & 0xf0;
-        for (int x = 0; x<vi.width; ++x) {
-          p[x] = map[p[x]<<8 | ditherMap[(x&0x0f)|_y]];
+      else if (vi.IsPlanar()) {
+        if (vi.IsYUV() || vi.IsYUVA()) {
+          // planar YUV
+          if (pixelsize == 1) {
+            for (int y = 0; y < vi.height; ++y) {
+              const int _y = (y << 4) & 0xf0;
+              for (int x = 0; x < vi.width; ++x) {
+                p[x] = map[p[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+              }
+              p += pitch;
+            }
+          }
+          else { // pixelsize==2
+            for (int y = 0; y < vi.height; ++y) {
+              const int _y = (y << 4) & 0xf0;
+              for (int x = 0; x < vi.width; ++x) {
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+              }
+              p += pitch;
+            }
+          }
+          const int UVpitch = frame->GetPitch(PLANAR_U);
+          const int w = frame->GetRowSize(PLANAR_U) / pixelsize;
+          const int h = frame->GetHeight(PLANAR_U);
+          p = frame->GetWritePtr(PLANAR_U);
+          BYTE* q = frame->GetWritePtr(PLANAR_V);
+          if (pixelsize == 1) {
+            for (int y = 0; y < h; ++y) {
+              const int _y = (y << 4) & 0xf0;
+              for (int x = 0; x < w; ++x) {
+                const int _dither = ditherMap[(x & 0x0f) | _y];
+                p[x] = mapchroma[p[x] << 8 | _dither];
+                q[x] = mapchroma[q[x] << 8 | _dither];
+              }
+              p += UVpitch;
+              q += UVpitch;
+            }
+          }
+          else { // pixelsize==2
+            for (int y = 0; y < h; ++y) {
+              const int _y = (y << 4) & 0xf0;
+              for (int x = 0; x < w; ++x) {
+                const int _dither = ditherMap[(x & 0x0f) | _y];
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(mapchroma)[reinterpret_cast<uint16_t *>(p)[x] << 8 | _dither];
+                reinterpret_cast<uint16_t *>(q)[x] = reinterpret_cast<uint16_t *>(mapchroma)[reinterpret_cast<uint16_t *>(q)[x] << 8 | _dither];
+              }
+              p += UVpitch;
+              q += UVpitch;
+            }
+          }
         }
-        p += pitch;
+        else {
+          // planar RGB
+          BYTE* b = frame->GetWritePtr(PLANAR_B);
+          BYTE* r = frame->GetWritePtr(PLANAR_R);
+          const int pitch_b = frame->GetPitch(PLANAR_B);
+          const int pitch_r = frame->GetPitch(PLANAR_R);
+          if (pixelsize == 1) {
+            for (int y = 0; y < vi.height; ++y) {
+              const int _y = (y << 4) & 0xf0;
+              for (int x = 0; x < vi.width; ++x) {
+                p[x] = map[p[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+                b[x] = map[b[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+                r[x] = map[r[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+              }
+              p += pitch;
+              b += pitch_b;
+              r += pitch_r;
+            }
+          }
+          else { // pixelsize==2
+            for (int y = 0; y < vi.height; ++y) {
+              const int _y = (y << 4) & 0xf0;
+              for (int x = 0; x < vi.width; ++x) {
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+                reinterpret_cast<uint16_t *>(b)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(b)[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+                reinterpret_cast<uint16_t *>(r)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(r)[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+              }
+              p += pitch;
+              b += pitch_b;
+              r += pitch_r;
+            }
+          }
+        }
       }
-      const int UVpitch = frame->GetPitch(PLANAR_U);
-      const int w = frame->GetRowSize(PLANAR_U);
-      const int h = frame->GetHeight(PLANAR_U);
-      p = frame->GetWritePtr(PLANAR_U);
-      BYTE* q = frame->GetWritePtr(PLANAR_V);
-      for (int y = 0; y<h; ++y) {
-        const int _y = (y << 4) & 0xf0;
-        for (int x = 0; x<w; ++x) {
-          const int _dither = ditherMap[(x&0x0f)|_y];
-          p[x] = mapchroma[p[x]<<8 | _dither];
-          q[x] = mapchroma[q[x]<<8 | _dither];
+      else if (vi.IsRGB32()) {
+        for (int y = 0; y < vi.height; ++y) {
+          const int _y = (y << 4) & 0xf0;
+          for (int x = 0; x < vi.width; ++x) {
+            const int _dither = ditherMap[(x & 0x0f) | _y];
+            p[x * 4 + 0] = map[p[x * 4 + 0] << 8 | _dither];
+            p[x * 4 + 1] = map[p[x * 4 + 1] << 8 | _dither];
+            p[x * 4 + 2] = map[p[x * 4 + 2] << 8 | _dither];
+            p[x * 4 + 3] = map[p[x * 4 + 3] << 8 | _dither];
+          }
+          p += pitch;
         }
-        p += UVpitch;
-        q += UVpitch;
       }
-    } else if (vi.IsRGB32()) {
-      for (int y = 0; y<vi.height; ++y) {
-        const int _y = (y << 4) & 0xf0;
-        for (int x = 0; x<vi.width; ++x) {
-          const int _dither = ditherMap[(x&0x0f)|_y];
-          p[x*4+0] = map[p[x*4+0]<<8 | _dither];
-          p[x*4+1] = map[p[x*4+1]<<8 | _dither];
-          p[x*4+2] = map[p[x*4+2]<<8 | _dither];
-          p[x*4+3] = map[p[x*4+3]<<8 | _dither];
+      else if (vi.IsRGB24()) {
+        for (int y = 0; y < vi.height; ++y) {
+          const int _y = (y << 4) & 0xf0;
+          for (int x = 0; x < vi.width; ++x) {
+            const int _dither = ditherMap[(x & 0x0f) | _y];
+            p[x * 3 + 0] = map[p[x * 3 + 0] << 8 | _dither];
+            p[x * 3 + 1] = map[p[x * 3 + 1] << 8 | _dither];
+            p[x * 3 + 2] = map[p[x * 3 + 2] << 8 | _dither];
+          }
+          p += pitch;
         }
-        p += pitch;
       }
-    } else if (vi.IsRGB24()) {
-      for (int y = 0; y<vi.height; ++y) {
-        const int _y = (y << 4) & 0xf0;
-        for (int x = 0; x<vi.width; ++x) {
-          const int _dither = ditherMap[(x&0x0f)|_y];
-          p[x*3+0] = map[p[x*3+0]<<8 | _dither];
-          p[x*3+1] = map[p[x*3+1]<<8 | _dither];
-          p[x*3+2] = map[p[x*3+2]<<8 | _dither];
+      else if (vi.IsRGB64()) {
+        for (int y = 0; y < vi.height; ++y) {
+          const int _y = (y << 4) & 0xf0;
+          for (int x = 0; x < vi.width; ++x) {
+            const int _dither = ditherMap[(x & 0x0f) | _y];
+            reinterpret_cast<uint16_t *>(p)[x * 4 + 0] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 4 + 0] << 8 | _dither];
+            reinterpret_cast<uint16_t *>(p)[x * 4 + 1] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 4 + 1] << 8 | _dither];
+            reinterpret_cast<uint16_t *>(p)[x * 4 + 2] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 4 + 2] << 8 | _dither];
+            reinterpret_cast<uint16_t *>(p)[x * 4 + 3] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 4 + 3] << 8 | _dither];
+          }
+          p += pitch;
         }
-        p += pitch;
+      }
+      else if (vi.IsRGB48()) {
+        for (int y = 0; y < vi.height; ++y) {
+          const int _y = (y << 4) & 0xf0;
+          for (int x = 0; x < vi.width; ++x) {
+            const int _dither = ditherMap[(x & 0x0f) | _y];
+            reinterpret_cast<uint16_t *>(p)[x * 3 + 0] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 3 + 0] << 8 | _dither];
+            reinterpret_cast<uint16_t *>(p)[x * 3 + 1] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 3 + 1] << 8 | _dither];
+            reinterpret_cast<uint16_t *>(p)[x * 3 + 2] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x * 3 + 2] << 8 | _dither];
+          }
+          p += pitch;
+        }
       }
     }
-  } else {
-    if (vi.IsYUY2()) {
-      for (int y = 0; y<vi.height; ++y) {
-        for (int x = 0; x<vi.width; ++x) {
-          p[x*2+0] = map[p[x*2+0]];
-          p[x*2+1] = mapchroma[p[x*2+1]];
+    else { // no dithering
+      if (vi.IsYUY2()) {
+        for (int y = 0; y < vi.height; ++y) {
+          for (int x = 0; x < vi.width; ++x) {
+            p[x * 2 + 0] = map[p[x * 2 + 0]];
+            p[x * 2 + 1] = mapchroma[p[x * 2 + 1]];
+          }
+          p += pitch;
         }
-        p += pitch;
       }
-    } else if (vi.IsPlanar()) {
-      for (int y = 0; y<vi.height; ++y) {
-        for (int x = 0; x<vi.width; ++x) {
-          p[x] = map[p[x]];
+      else if (vi.IsPlanar()) {
+        if (vi.IsYUV() || vi.IsYUVA()) {
+          // planar YUV
+          if (pixelsize == 1) {
+            for (int y = 0; y < vi.height; ++y) {
+              for (int x = 0; x < vi.width; ++x) {
+                p[x] = map[p[x]];
+              }
+              p += pitch;
+            }
+          }
+          else { // pixelsize==2
+            for (int y = 0; y < vi.height; ++y) {
+              for (int x = 0; x < vi.width; ++x) {
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x]];
+              }
+              p += pitch;
+            }
+          }
+          const int UVpitch = frame->GetPitch(PLANAR_U);
+          p = frame->GetWritePtr(PLANAR_U);
+          const int w = frame->GetRowSize(PLANAR_U) / pixelsize;
+          const int h = frame->GetHeight(PLANAR_U);
+          if (pixelsize == 1) {
+            for (int y = 0; y < h; ++y) {
+              for (int x = 0; x < w; ++x) {
+                p[x] = mapchroma[p[x]];
+              }
+              p += UVpitch;
+            }
+            p = frame->GetWritePtr(PLANAR_V);
+            for (int y = 0; y < h; ++y) {
+              for (int x = 0; x < w; ++x) {
+                p[x] = mapchroma[p[x]];
+              }
+              p += UVpitch;
+            }
+          }
+          else { // pixelsize==2
+            for (int y = 0; y < h; ++y) {
+              for (int x = 0; x < w; ++x) {
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(mapchroma)[reinterpret_cast<uint16_t *>(p)[x]];
+              }
+              p += UVpitch;
+            }
+            p = frame->GetWritePtr(PLANAR_V);
+            for (int y = 0; y < h; ++y) {
+              for (int x = 0; x < w; ++x) {
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(mapchroma)[reinterpret_cast<uint16_t *>(p)[x]];
+              }
+              p += UVpitch;
+            }
+          }
         }
-        p += pitch;
+        else {
+          // Planar RGB
+          BYTE* b = frame->GetWritePtr(PLANAR_B);
+          BYTE* r = frame->GetWritePtr(PLANAR_R);
+          const int pitch_b = frame->GetPitch(PLANAR_B);
+          const int pitch_r = frame->GetPitch(PLANAR_R);
+          if (pixelsize == 1) {
+            for (int y = 0; y < vi.height; ++y) {
+              for (int x = 0; x < vi.width; ++x) {
+                p[x] = map[p[x]];
+                b[x] = map[b[x]];
+                r[x] = map[r[x]];
+              }
+              p += pitch;
+              b += pitch_b;
+              r += pitch_r;
+            }
+          }
+          else { // pixelsize==2
+            for (int y = 0; y < vi.height; ++y) {
+              for (int x = 0; x < vi.width; ++x) {
+                reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x]];
+                reinterpret_cast<uint16_t *>(b)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(b)[x]];
+                reinterpret_cast<uint16_t *>(r)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(r)[x]];
+              }
+              p += pitch;
+              b += pitch_b;
+              r += pitch_r;
+            }
+          }
+        }
       }
-      const int UVpitch = frame->GetPitch(PLANAR_U);
-      p = frame->GetWritePtr(PLANAR_U);
-      const int w = frame->GetRowSize(PLANAR_U);
-      const int h = frame->GetHeight(PLANAR_U);
-      for (int y = 0; y<h; ++y) {
-        for (int x = 0; x<w; ++x) {
-          p[x] = mapchroma[p[x]];
+      else if (vi.IsRGB()) {
+     // packed RGB
+        const int work_width = frame->GetRowSize() / pixelsize;
+        if (pixelsize == 1) {
+          for (int y = 0; y < vi.height; ++y) {
+            for (int x = 0; x < work_width; ++x) {
+              p[x] = map[p[x]];
+            }
+            p += pitch;
+          }
         }
-        p += UVpitch;
+        else { // pixelsize==2
+          for (int y = 0; y < vi.height; ++y) {
+            for (int x = 0; x < work_width; ++x) {
+              reinterpret_cast<uint16_t *>(p)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(p)[x]];
+            }
+            p += pitch;
+          }
+        }
       }
-      p = frame->GetWritePtr(PLANAR_V);
-      for (int y = 0; y<h; ++y) {
-        for (int x = 0; x<w; ++x) {
-          p[x] = mapchroma[p[x]];
+    }
+  }
+  else {
+    // float 32 bit. only planars here
+    // no lut, realtime calculation only
+    if (dither) {
+      if (vi.IsYUV() || vi.IsYUVA()) { // planar YUV (incl Y only)
+        // luma. with or w/o gamma
+        if (use_gamma) {
+          for (int y = 0; y < vi.height; ++y) {
+            const int _y = (y << 4) & 0xf0;
+            for (int x = 0; x < vi.width; ++x) {
+              float _dither = ditherMap_f[(x & 0x0f) | _y];
+              const float pixel = reinterpret_cast<float *>(p)[x] + _dither;
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, true>(pixel);
+            }
+            p += pitch;
+          }
         }
-        p += UVpitch;
+        else {
+          // don't use gamma (faster)
+          for (int y = 0; y < vi.height; ++y) {
+            const int _y = (y << 4) & 0xf0;
+            for (int x = 0; x < vi.width; ++x) {
+              float _dither = ditherMap_f[(x & 0x0f) | _y];
+              const float pixel = reinterpret_cast<float *>(p)[x] + _dither;
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, false>(pixel); // w/o gamma
+            }
+            p += pitch;
+          }
+        }
+        // chroma
+        if (need_chroma) {
+          const int UVpitch = frame->GetPitch(PLANAR_U);
+          const int w = frame->GetRowSize(PLANAR_U) / pixelsize;
+          const int h = frame->GetHeight(PLANAR_U);
+          p = frame->GetWritePtr(PLANAR_U);
+          BYTE* q = frame->GetWritePtr(PLANAR_V);
+          for (int y = 0; y < h; ++y) {
+            const int _y = (y << 4) & 0xf0;
+            for (int x = 0; x < w; ++x) {
+              float _dither = ditherMap_f[(x & 0x0f) | _y];
+              const float pixel_u = reinterpret_cast<float *>(p)[x] + _dither;
+              reinterpret_cast<float *>(p)[x] = calcPixel<true, false>(pixel_u);
+              const float pixel_v = reinterpret_cast<float *>(q)[x] + _dither;
+              reinterpret_cast<float *>(q)[x] = calcPixel<true, false>(pixel_v);
+            }
+            p += UVpitch;
+            q += UVpitch;
+          }
+        }
       }
-    } else if (vi.IsRGB()) {
-      const int row_size = frame->GetRowSize();
-      for (int y = 0; y<vi.height; ++y) {
-        for (int x = 0; x<row_size; ++x) {
-          p[x] = map[p[x]];
+      else if (vi.IsPlanarRGB() || vi.IsPlanarRGBA()) {
+        // planar RGB
+        BYTE* b = frame->GetWritePtr(PLANAR_B);
+        BYTE* r = frame->GetWritePtr(PLANAR_R);
+        const int pitch_b = frame->GetPitch(PLANAR_B);
+        const int pitch_r = frame->GetPitch(PLANAR_R);
+        if (use_gamma) {
+          for (int y = 0; y < vi.height; ++y) {
+            const int _y = (y << 4) & 0xf0;
+            for (int x = 0; x < vi.width; ++x) {
+              float _dither = ditherMap_f[(x & 0x0f) | _y];
+              const float pixel_p = reinterpret_cast<float *>(p)[x] + _dither; // g channel
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, true>(pixel_p);
+              const float pixel_b = reinterpret_cast<float *>(b)[x] + _dither;
+              reinterpret_cast<float *>(b)[x] = calcPixel<false, true>(pixel_b);
+              const float pixel_r = reinterpret_cast<float *>(r)[x] + _dither;
+              reinterpret_cast<float *>(r)[x] = calcPixel<false, true>(pixel_r);
+            }
+            p += pitch; // g
+            b += pitch_b;
+            r += pitch_r;
+          }
         }
-        p += pitch;
+        else {
+          for (int y = 0; y < vi.height; ++y) {
+            const int _y = (y << 4) & 0xf0;
+            for (int x = 0; x < vi.width; ++x) {
+              float _dither = ditherMap_f[(x & 0x0f) | _y];
+              const float pixel_p = reinterpret_cast<float *>(p)[x] + _dither; // g channel
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, false>(pixel_p);
+              const float pixel_b = reinterpret_cast<float *>(b)[x] + _dither;
+              reinterpret_cast<float *>(b)[x] = calcPixel<false, false>(pixel_b);
+              const float pixel_r = reinterpret_cast<float *>(r)[x] + _dither;
+              reinterpret_cast<float *>(r)[x] = calcPixel<false, false>(pixel_r);
+            }
+            p += pitch; // g
+            b += pitch_b;
+            r += pitch_r;
+          }
+        }
+      }
+      else {
+        // 32 bit, neither YUV(A), nor RGB(A)
+      }
+    }
+    else {
+      // no dither
+      if (vi.IsYUV() || vi.IsYUVA()) { // planar YUV (incl Y only)
+                                       // luma. with or w/o gamma
+        if (use_gamma) {
+          for (int y = 0; y < vi.height; ++y) {
+            for (int x = 0; x < vi.width; ++x) {
+              const float pixel = reinterpret_cast<float *>(p)[x];
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, true>(pixel);
+            }
+            p += pitch;
+          }
+        }
+        else {
+          // don't use gamma (faster)
+          for (int y = 0; y < vi.height; ++y) {
+            for (int x = 0; x < vi.width; ++x) {
+              const float pixel = reinterpret_cast<float *>(p)[x];
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, false>(pixel); // w/o gamma
+            }
+            p += pitch;
+          }
+        }
+        // chroma
+        if (need_chroma) {
+          const int UVpitch = frame->GetPitch(PLANAR_U);
+          const int w = frame->GetRowSize(PLANAR_U) / pixelsize;
+          const int h = frame->GetHeight(PLANAR_U);
+          p = frame->GetWritePtr(PLANAR_U);
+          BYTE* q = frame->GetWritePtr(PLANAR_V);
+          for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+              const float pixel_u = reinterpret_cast<float *>(p)[x];
+              reinterpret_cast<float *>(p)[x] = calcPixel<true, false>(pixel_u);
+              const float pixel_v = reinterpret_cast<float *>(q)[x];
+              reinterpret_cast<float *>(q)[x] = calcPixel<true, false>(pixel_v);
+            }
+            p += UVpitch;
+            q += UVpitch;
+          }
+        }
+      }
+      else if (vi.IsPlanarRGB() || vi.IsPlanarRGBA()) {
+        // planar RGB
+        BYTE* b = frame->GetWritePtr(PLANAR_B);
+        BYTE* r = frame->GetWritePtr(PLANAR_R);
+        const int pitch_b = frame->GetPitch(PLANAR_B);
+        const int pitch_r = frame->GetPitch(PLANAR_R);
+        if (use_gamma) {
+          for (int y = 0; y < vi.height; ++y) {
+            for (int x = 0; x < vi.width; ++x) {
+              const float pixel_p = reinterpret_cast<float *>(p)[x]; // g channel
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, true>(pixel_p);
+              const float pixel_b = reinterpret_cast<float *>(b)[x];
+              reinterpret_cast<float *>(b)[x] = calcPixel<false, true>(pixel_b);
+              const float pixel_r = reinterpret_cast<float *>(r)[x];
+              reinterpret_cast<float *>(r)[x] = calcPixel<false, true>(pixel_r);
+            }
+            p += pitch; // g
+            b += pitch_b;
+            r += pitch_r;
+          }
+        }
+        else {
+          for (int y = 0; y < vi.height; ++y) {
+            for (int x = 0; x < vi.width; ++x) {
+              const float pixel_p = reinterpret_cast<float *>(p)[x]; // g channel
+              reinterpret_cast<float *>(p)[x] = calcPixel<false, false>(pixel_p);
+              const float pixel_b = reinterpret_cast<float *>(b)[x];
+              reinterpret_cast<float *>(b)[x] = calcPixel<false, false>(pixel_b);
+              const float pixel_r = reinterpret_cast<float *>(r)[x];
+              reinterpret_cast<float *>(r)[x] = calcPixel<false, false>(pixel_r);
+            }
+            p += pitch; // g
+            b += pitch_b;
+            r += pitch_r;
+          }
+        }
+      }
+      else {
+        // 32 bit, neither YUV(A), nor RGB(A)
       }
     }
   }
@@ -308,68 +802,279 @@ PVideoFrame __stdcall Levels::GetFrame(int n, IScriptEnvironment* env)
 AVSValue __cdecl Levels::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
   enum { CHILD, IN_MIN, GAMMA, IN_MAX, OUT_MIN, OUT_MAX, CORING, DITHER };
-  return new Levels( args[CHILD].AsClip(), args[IN_MIN].AsInt(), args[GAMMA].AsFloat(), args[IN_MAX].AsInt(),
-                     args[OUT_MIN].AsInt(), args[OUT_MAX].AsInt(), args[CORING].AsBool(true), args[DITHER].AsBool(false), env );
+  return new Levels( args[CHILD].AsClip(), (float)args[IN_MIN].AsFloat(), (float)args[GAMMA].AsFloat(), (float)args[IN_MAX].AsFloat(),
+    (float)args[OUT_MIN].AsFloat(), (float)args[OUT_MAX].AsFloat(), args[CORING].AsBool(true), args[DITHER].AsBool(false), env );
 }
-
-
-
-
-
-
-
 
 /********************************
  *******    RGBA Filter    ******
  ********************************/
 
+#define READ_CONDITIONAL(plane_num, var_name, internal_name, condVarSuffix)  \
+    {                                                     \
+        std::string s = "rgbadjust_" #var_name;\
+        s = s + condVarSuffix; \
+        const double t = env2->GetVar(s.c_str(), DBL_MIN); \
+        if (t != DBL_MIN) {                             \
+            config->rgba[plane_num].internal_name = t;  \
+            config->rgba[plane_num].changed = true;     \
+        }                                               \
+    }
+
+static void rgbadjust_read_conditional(IScriptEnvironment* env, RGBAdjustConfig* config, const char * condVarSuffix)
+{
+  auto env2 = static_cast<IScriptEnvironment2*>(env);
+
+  READ_CONDITIONAL(0, r, scale, condVarSuffix);
+  READ_CONDITIONAL(1, g, scale, condVarSuffix);
+  READ_CONDITIONAL(2, b, scale, condVarSuffix);
+  READ_CONDITIONAL(3, a, scale, condVarSuffix);
+
+  READ_CONDITIONAL(0, rb, bias, condVarSuffix);
+  READ_CONDITIONAL(1, gb, bias, condVarSuffix);
+  READ_CONDITIONAL(2, bb, bias, condVarSuffix);
+  READ_CONDITIONAL(3, ab, bias, condVarSuffix);
+
+  READ_CONDITIONAL(0, rg, gamma, condVarSuffix);
+  READ_CONDITIONAL(1, gg, gamma, condVarSuffix);
+  READ_CONDITIONAL(2, bg, gamma, condVarSuffix);
+  READ_CONDITIONAL(3, ag, gamma, condVarSuffix);
+}
+
+#undef READ_CONDITIONAL
+
+
+
+RGBAdjust::~RGBAdjust()
+{
+  if (map_holder)
+    delete[] map_holder;
+}
+
+void RGBAdjust::CheckAndConvertParams(RGBAdjustConfig &config, IScriptEnvironment *env)
+{
+  if ((config.rgba[0].gamma <= 0.0) || (config.rgba[1].gamma <= 0.0) || (config.rgba[2].gamma <= 0.0) || (config.rgba[3].gamma <= 0.0))
+    env->ThrowError("RGBAdjust: gammas must be positive");
+}
+
+static __inline float RGBAdjust_processPixel(const float val, const double c0, const double c1, const double c2)
+{
+  const double pixel_max = 1.0;
+  return (float)(pow(clamp((c0 + val * c1) / pixel_max, 0.0, 1.0), c2));
+}
+
+void RGBAdjust::rgbadjust_create_lut(BYTE *lut_buf, const int plane, RGBAdjustConfig &cfg) {
+  if (!use_lut)
+    return;
+
+  const int lookup_size = 1 << bits_per_pixel; // 256, 1024, 4096, 16384, 65536
+
+  void(*set_map)(BYTE*, int, int, float, const double, const double, const double);
+  if (dither) {
+    set_map = [](BYTE* map, int lookup_size, int bits_per_pixel, float dither_strength, const double c0, const double c1, const double c2) {
+      double bias_dither = -(256.0f * dither_strength - 1) / 2; // -127.5 for 8 bit, scaling because of dithershift
+      double pixel_max = (1 << bits_per_pixel) - 1;
+      if (bits_per_pixel == 8) {
+        for (int i = 0; i < lookup_size * 256; ++i) {
+          int ii = (i & 0xFFFFFF00) + (int)((i & 0xFF)*dither_strength);
+          map[i] = BYTE(pow(clamp((c0 * 256 + ii * c1 - bias_dither) / (double(pixel_max) * 256), 0.0, 1.0), c2) * (double)pixel_max + 0.5);
+        }
+      }
+      else {
+        for (int i = 0; i < lookup_size * 256; ++i) {
+          int ii = (i & 0xFFFFFF00) + (int)((i & 0xFF)*dither_strength);
+          reinterpret_cast<uint16_t *>(map)[i] = uint16_t(pow(clamp((c0 * 256 + ii * c1 - bias_dither) / (double(pixel_max) * 256), 0.0, 1.0), c2) * (double)pixel_max + 0.5);
+        }
+      }
+    };
+  }
+  else {
+    set_map = [](BYTE* map, int lookup_size, int bits_per_pixel, float dither_strength, const double c0, const double c1, const double c2) {
+      double pixel_max = (1 << bits_per_pixel) - 1;
+      if (bits_per_pixel == 8) {
+        for (int i = 0; i < lookup_size; ++i) { // fix of bug introduced in an earlier refactor was: i < 256 * 256
+          map[i] = BYTE(pow(clamp((c0 + i * c1) / (double)pixel_max, 0.0, 1.0), c2) * double(pixel_max) + 0.5);
+        }
+      }
+      else {
+        for (int i = 0; i < lookup_size; ++i) { // fix of bug introduced in an earlier refactor was: i < 256 * 256
+          reinterpret_cast<uint16_t *>(map)[i] = uint16_t(pow(clamp((c0 + i * c1) / (double)pixel_max, 0.0, 1.0), c2) * double(pixel_max) + 0.5);
+        }
+      }
+    };
+  }
+
+  set_map(lut_buf, lookup_size, bits_per_pixel, dither_strength, cfg.rgba[plane].bias, cfg.rgba[plane].scale, 1 / cfg.rgba[plane].gamma);
+}
+
 RGBAdjust::RGBAdjust(PClip _child, double r, double g, double b, double a,
     double rb, double gb, double bb, double ab,
     double rg, double gg, double bg, double ag,
-    bool _analyze, bool _dither, IScriptEnvironment* env)
-    : GenericVideoFilter(_child), analyze(_analyze), dither(_dither)
+    bool _analyze, bool _dither, bool _conditional, const char *_condVarSuffix, IScriptEnvironment* env)
+    : GenericVideoFilter(_child), analyze(_analyze), dither(_dither), condVarSuffix(_condVarSuffix)
 {
+    // one buffer for all maps
+    map_holder = nullptr;
+
     if (!vi.IsRGB())
         env->ThrowError("RGBAdjust requires RGB input");
 
-    if ((rg <= 0.0) || (gg <= 0.0) || (bg <= 0.0) || (ag <= 0.0))
-        env->ThrowError("RGBAdjust: gammas must be positive");
+    config.rgba[0].scale = r;
+    config.rgba[1].scale = g;
+    config.rgba[2].scale = b;
+    config.rgba[3].scale = a;
+    // bias
+    config.rgba[0].bias = rb;
+    config.rgba[1].bias = gb;
+    config.rgba[2].bias = bb;
+    config.rgba[3].bias = ab;
+    // gammas
+    config.rgba[0].gamma = rg;
+    config.rgba[1].gamma = gg;
+    config.rgba[2].gamma = bg;
+    config.rgba[3].gamma = ag;
 
-    rg = 1 / rg; gg = 1 / gg; bg = 1 / bg; ag = 1 / ag;
+    config.rgba[0].changed = false;
+    config.rgba[1].changed = false;
+    config.rgba[2].changed = false;
+    config.rgba[3].changed = false;
 
-    auto env2 = static_cast<IScriptEnvironment2*>(env);
-    size_t num_map = vi.IsRGB24() ? 3 : 4;
-    size_t map_size = dither ? 256 * 256 : 256;
+    CheckAndConvertParams(config, env);
 
-    mapR = static_cast<uint8_t*>(env2->Allocate(map_size * num_map, 8, AVS_NORMAL_ALLOC));
-    if (!mapR)
-        env->ThrowError("RGBAdjust: Could not reserve memory.");
-    env->AtExit(free_buffer, mapR);
+    pixelsize = vi.ComponentSize();
+    bits_per_pixel = vi.BitsPerComponent(); // 8,10..16
 
-    mapG = mapR + map_size;
-    mapB = mapG + map_size;
-    mapA = num_map == 4 ? mapB + map_size : nullptr;
-
-    void(*set_map)(BYTE*, const double, const double, const double);
-    if (dither) {
-        set_map = [](BYTE* map, const double c0, const double c1, const double c2) {
-            for (int i = 0; i < 256 * 256; ++i) {
-                map[i] = BYTE(pow(clamp((c0 * 256 + i * c1 - 127.5) / (255.0 * 256), 0.0, 1.0), c2) * 255.0 + 0.5);
-            }
-        };
-    } else {
-        set_map = [](BYTE* map, const double c0, const double c1, const double c2) {
-            for (int i = 0; i < 256 * 256; ++i) {
-                map[i] = BYTE(pow(clamp((c0 + i * c1) / 255.0, 0.0, 1.0), c2) * 255.0 + 0.5);
-            }
-        };
+    if (pixelsize == 4) {
+      if (analyze)
+        env->ThrowError("RGBAdjust: cannot 'analyze' a 32bit float video");
+      // dither parameter is silently ignored
+      // if (dither) env->ThrowError("RGBAdjust: cannot 'dither' a 32bit float video");
     }
+    // No lookup for float. todo: slow on-the-fly realtime calculation
 
-    set_map(mapR, rb, r, rg);
-    set_map(mapG, gb, g, gg);
-    set_map(mapB, bb, b, bg);
-    if (num_map == 4)
-        set_map(mapA, ab, a, ag);
+    real_lookup_size = (pixelsize == 1) ? 256 : 65536; // avoids lut overflow in case of non-standard content of a 10 bit clip
+    max_pixel_value = (pixelsize == 4) ? 255 : (1 << bits_per_pixel) - 1; // n/a for float formats
+    dither_strength = 1.0f; // fixed, not used
+
+    use_lut = bits_per_pixel != 32; // for float: realtime (todo)
+
+    if (!use_lut)
+      dither = false;
+
+    if(use_lut) {
+      auto env2 = static_cast<IScriptEnvironment2*>(env);
+      number_of_maps = (vi.IsRGB24() || vi.IsRGB48() || vi.IsPlanarRGB()) ? 3 : 4;
+      int one_bufsize = pixelsize * real_lookup_size;
+      if (dither) one_bufsize *= 256;
+
+      map_holder = new uint8_t[one_bufsize * number_of_maps];
+      /* 
+      // left here intentionally: 
+      // for some reason, AtExit does not get called from within ScriptClip, causing no free thus memory leak
+      // We are using new here and delete in destructor
+      static_cast<uint8_t*>(env2->Allocate(one_bufsize * number_of_maps, 16, AVS_NORMAL_ALLOC));
+      if (!mapR)
+          env->ThrowError("RGBAdjust: Could not reserve memory.");
+      env->AtExit(free_buffer, mapR);
+      */
+      if(bits_per_pixel>8 && bits_per_pixel<16) // make lut table safe for 10-14 bit garbage
+        std::fill_n(map_holder, one_bufsize * number_of_maps, 0); // 8 and 16 bit fully overwrites
+      maps[0] = map_holder;
+      maps[1] = maps[0] + one_bufsize;
+      maps[2] = maps[1] + one_bufsize;
+      maps[3] = number_of_maps == 4 ? maps[2] + one_bufsize : nullptr;
+
+      for (size_t plane = 0; plane < number_of_maps; plane++) {
+        rgbadjust_create_lut(maps[plane], plane, config);
+      }
+    }
+}
+
+template<typename pixel_t>
+static void fill_accum_rgb_planar_c(const BYTE *srcpR, const BYTE* srcpG, const BYTE* srcpB, int pitch,
+  unsigned int *accum_r, unsigned int *accum_g, unsigned int *accum_b,
+  int width, int height) {
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        accum_r[reinterpret_cast<const pixel_t *>(srcpR)[x]]++;
+        accum_g[reinterpret_cast<const pixel_t *>(srcpG)[x]]++;
+        accum_b[reinterpret_cast<const pixel_t *>(srcpB)[x]]++;
+      }
+      srcpR += pitch;
+      srcpG += pitch;
+      srcpB += pitch;
+    }
+}
+
+template<typename pixel_t>
+static void fill_accum_rgb_packed_c(const BYTE *srcp, int pitch,
+  unsigned int *accum_r, unsigned int *accum_g, unsigned int *accum_b,
+  int work_width, int height, int pixel_step) {
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < work_width; x += pixel_step) {
+      accum_r[reinterpret_cast<const pixel_t *>(srcp)[x + 2]]++;
+      accum_g[reinterpret_cast<const pixel_t *>(srcp)[x + 1]]++;
+      accum_b[reinterpret_cast<const pixel_t *>(srcp)[x + 0]]++;
+    }
+    srcp += pitch;
+  }
+}
+
+template<typename pixel_t, int pixel_step, bool dither>
+static void apply_map_rgb_packed_c(BYTE *dstp8, int pitch,
+  BYTE *mapR, BYTE *mapG, BYTE *mapB, BYTE *mapA,
+  int width, int height)
+{
+  int _y = 0;
+  int _dither = 0;
+  pixel_t *dstp = reinterpret_cast<pixel_t *>(dstp8);
+  pitch /= sizeof(pixel_t);
+
+  for (int y = 0; y < height; y++) {
+    if(dither)
+      _y = (y << 4) & 0xf0;
+    for (int x = 0; x < width; x++) {
+      if (dither)
+        _dither = ditherMap[(x & 0x0f) | _y];
+      dstp[x * pixel_step + 0] = reinterpret_cast<pixel_t *>(mapB)[dither ? dstp[x * pixel_step + 0] << 8 | _dither : dstp[x * pixel_step + 0]];
+      dstp[x * pixel_step + 1] = reinterpret_cast<pixel_t *>(mapG)[dither ? dstp[x * pixel_step + 1] << 8 | _dither : dstp[x * pixel_step + 1]];
+      dstp[x * pixel_step + 2] = reinterpret_cast<pixel_t *>(mapR)[dither ? dstp[x * pixel_step + 2] << 8 | _dither : dstp[x * pixel_step + 2]];
+      if constexpr(pixel_step == 4)
+        dstp[x * pixel_step + 3] = reinterpret_cast<pixel_t *>(mapA)[dither ? dstp[x * pixel_step + 3] << 8 | _dither : dstp[x * pixel_step + 3]];
+    }
+    dstp += pitch;
+  }
+}
+
+template<typename pixel_t, bool hasAlpha, bool dither>
+static void apply_map_rgb_planar_c(BYTE *dstpR8, BYTE *dstpG8, BYTE *dstpB8, BYTE *dstpA8, int pitch,
+  BYTE *mapR, BYTE *mapG, BYTE *mapB, BYTE *mapA,
+  int width, int height)
+{
+  int _y = 0;
+  int _dither = 0;
+  pixel_t *dstpR = reinterpret_cast<pixel_t *>(dstpR8);
+  pixel_t *dstpG = reinterpret_cast<pixel_t *>(dstpG8);
+  pixel_t *dstpB = reinterpret_cast<pixel_t *>(dstpB8);
+  pixel_t *dstpA = reinterpret_cast<pixel_t *>(dstpA8);
+  pitch /= sizeof(pixel_t);
+
+  for (int y = 0; y < height; y++) {
+    if(dither)
+      _y = (y << 4) & 0xf0;
+    for (int x = 0; x < width; x++) {
+      if (dither)
+        _dither = ditherMap[(x & 0x0f) | _y];
+      reinterpret_cast<pixel_t *>(dstpG)[x] = reinterpret_cast<pixel_t *>(mapG)[dither ? dstpG[x] << 8 | _dither : dstpG[x]];
+      reinterpret_cast<pixel_t *>(dstpB)[x] = reinterpret_cast<pixel_t *>(mapB)[dither ? dstpB[x] << 8 | _dither : dstpB[x]];
+      reinterpret_cast<pixel_t *>(dstpR)[x] = reinterpret_cast<pixel_t *>(mapR)[dither ? dstpR[x] << 8 | _dither : dstpR[x]];
+      if(hasAlpha)
+        reinterpret_cast<pixel_t *>(dstpA)[x] = reinterpret_cast<pixel_t *>(mapA)[dither ? dstpA[x] << 8 | _dither : dstpA[x]];
+    }
+    dstpG += pitch; dstpB += pitch; dstpR += pitch;
+    if(hasAlpha)
+      dstpA += pitch;
+  }
 }
 
 
@@ -380,79 +1085,173 @@ PVideoFrame __stdcall RGBAdjust::GetFrame(int n, IScriptEnvironment* env)
     BYTE* p = frame->GetWritePtr();
     const int pitch = frame->GetPitch();
 
+    int w = vi.width;
+    int h = vi.height;
+
+    RGBAdjustConfig local_config = config;
+
+    // Read conditional variables
+    local_config.rgba[0].changed = false;
+    local_config.rgba[1].changed = false;
+    local_config.rgba[2].changed = false;
+    local_config.rgba[3].changed = false;
+    rgbadjust_read_conditional(env, &local_config, condVarSuffix);
+
+    BYTE *maps_live[4] = { nullptr };
+    BYTE *maps_local[4] = { nullptr }; // for local lut table allocation, don't overwrite common buffer
+    for (int i = 0; i < 4; i++)
+      maps_live[i] = maps[i];
+
+    if (local_config.rgba[0].changed || local_config.rgba[1].changed || local_config.rgba[2].changed || local_config.rgba[3].changed) {
+      CheckAndConvertParams(local_config, env);
+      if (use_lut) {
+        for (size_t plane = 0; plane < number_of_maps; plane++) {
+          // recalculate plane LUT only if changed
+          if (local_config.rgba[plane].changed)
+          {
+            maps_local[plane] = new BYTE[pixelsize * real_lookup_size];
+            maps_live[plane] = maps_local[plane]; // use our new local lut
+            rgbadjust_create_lut(maps_live[plane], plane, local_config);
+          }
+        }
+      }
+    }
+
     if (dither) {
-        if (vi.IsRGB32()) {
-            for (int y = 0; y < vi.height; ++y) {
-                const int _y = (y << 4) & 0xf0;
-                for (int x = 0; x < vi.width; ++x) {
-                    const int _dither = ditherMap[(x & 0x0f) | _y];
-                    p[x * 4 + 0] = mapB[p[x * 4 + 0] << 8 | _dither];
-                    p[x * 4 + 1] = mapG[p[x * 4 + 1] << 8 | _dither];
-                    p[x * 4 + 2] = mapR[p[x * 4 + 2] << 8 | _dither];
-                    p[x * 4 + 3] = mapA[p[x * 4 + 3] << 8 | _dither];
-                }
-                p += pitch;
-            }
+      if (vi.IsRGB32())
+        apply_map_rgb_packed_c<uint8_t, 4, true>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else if(vi.IsRGB24())
+        apply_map_rgb_packed_c<uint8_t, 3, true>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else if(vi.IsRGB64())
+        apply_map_rgb_packed_c<uint16_t, 4, true>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else if(vi.IsRGB48())
+        apply_map_rgb_packed_c<uint16_t, 3, true>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else {
+        // Planar RGB
+        bool hasAlpha = vi.IsPlanarRGBA();
+        BYTE *p_g = p;
+        BYTE *p_b = frame->GetWritePtr(PLANAR_B);
+        BYTE *p_r = frame->GetWritePtr(PLANAR_R);
+        BYTE *p_a = frame->GetWritePtr(PLANAR_A);
+        // no float support
+        if(pixelsize==1) {
+          if(hasAlpha)
+            apply_map_rgb_planar_c<uint8_t, true, true>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+          else
+            apply_map_rgb_planar_c<uint8_t, false, true>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
         }
-        else if (vi.IsRGB24()) {
-            for (int y = 0; y < vi.height; ++y) {
-                const int _y = (y << 4) & 0xf0;
-                for (int x = 0; x < vi.width; ++x) {
-                    const int _dither = ditherMap[(x & 0x0f) | _y];
-                    p[x * 3 + 0] = mapB[p[x * 3 + 0] << 8 | _dither];
-                    p[x * 3 + 1] = mapG[p[x * 3 + 1] << 8 | _dither];
-                    p[x * 3 + 2] = mapR[p[x * 3 + 2] << 8 | _dither];
-                }
-                p += pitch;
-            }
+        else {
+          if(hasAlpha)
+            apply_map_rgb_planar_c<uint16_t, true, true>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+          else
+            apply_map_rgb_planar_c<uint16_t, false, true>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
         }
+      }
     }
     else {
-        if (vi.IsRGB32()) {
-            for (int y = 0; y < vi.height; ++y) {
-                for (int x = 0; x < vi.width; ++x) {
-                    p[x * 4] = mapB[p[x * 4]];
-                    p[x * 4 + 1] = mapG[p[x * 4 + 1]];
-                    p[x * 4 + 2] = mapR[p[x * 4 + 2]];
-                    p[x * 4 + 3] = mapA[p[x * 4 + 3]];
-                }
-                p += pitch;
-            }
+      // no dither
+      if (vi.IsRGB32())
+        apply_map_rgb_packed_c<uint8_t, 4, false>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else if(vi.IsRGB24())
+        apply_map_rgb_packed_c<uint8_t, 3, false>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else if(vi.IsRGB64())
+        apply_map_rgb_packed_c<uint16_t, 4, false>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else if(vi.IsRGB48())
+        apply_map_rgb_packed_c<uint16_t, 3, false>(p, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+      else {
+          // Planar RGB
+        bool hasAlpha = vi.IsPlanarRGBA();
+        BYTE *p_g = p;
+        BYTE *p_b = frame->GetWritePtr(PLANAR_B);
+        BYTE *p_r = frame->GetWritePtr(PLANAR_R);
+        BYTE *p_a = frame->GetWritePtr(PLANAR_A);
+        // no float support
+        if(pixelsize==1) {
+          if(hasAlpha)
+            apply_map_rgb_planar_c<uint8_t, true, false>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+          else
+            apply_map_rgb_planar_c<uint8_t, false, false>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
         }
-        else if (vi.IsRGB24()) {
-            const int row_size = frame->GetRowSize();
-            for (int y = 0; y < vi.height; ++y) {
-                for (int x = 0; x < row_size; x += 3) {
-                    p[x] = mapB[p[x]];
-                    p[x + 1] = mapG[p[x + 1]];
-                    p[x + 2] = mapR[p[x + 2]];
-                }
-                p += pitch;
-            }
+        else if(pixelsize==2) {
+          if(hasAlpha)
+            apply_map_rgb_planar_c<uint16_t, true, false>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
+          else
+            apply_map_rgb_planar_c<uint16_t, false, false>(p_r, p_g, p_b, p_a, pitch, maps_live[0], maps_live[1], maps_live[2], maps_live[3], w, h);
         }
+        else {
+          // 32 bit float, no dither
+          const int planesRGB_RgbaOrder[4] = { PLANAR_R, PLANAR_G, PLANAR_B, PLANAR_A };
+          const int *planes = planesRGB_RgbaOrder;
+
+          for (int cplane = 0; cplane < (hasAlpha ? 4 : 3); cplane++) {
+            RGBAdjustPlaneConfig x = local_config.rgba[cplane];
+            const double scale = x.scale;
+            const double bias = x.bias;
+            const double gamma = 1 / x.gamma;
+            int plane = planes[cplane];
+            float* dstp = reinterpret_cast<float *>(frame->GetWritePtr(plane));
+            int pitch = frame->GetPitch(plane) / sizeof(float);
+            int row_size = frame->GetRowSize(plane);
+            int height = frame->GetHeight(plane);
+            for (int y = 0; y < h; y++) {
+              for (int x = 0; x < w; x++) {
+                dstp[x] = RGBAdjust_processPixel(dstp[x], bias, scale, gamma);
+              }
+              dstp += pitch;
+            }
+          }
+        }
+      }
+    }
+
+    if (use_lut && conditional) {
+      for(int i = 0; i<4; i++)
+        if (maps_local[i]) delete[] maps_local[i];
     }
 
     if (analyze) {
-        const int w = frame->GetRowSize();
+        // no 32bit float here yet
+        const int w = frame->GetRowSize() / pixelsize;
         const int h = frame->GetHeight();
-        const int t = vi.IsRGB24() ? 3 : 4;
-        unsigned int accum_r[256], accum_g[256], accum_b[256];
 
-        p = frame->GetWritePtr();
+        int lookup_size = 1 << bits_per_pixel; // 256, 1024, 4096, 16384, 65536
+        int real_lookup_size = (pixelsize == 1) ? 256 : 65536; // avoids lut overflow in case of non-standard content of a 10 bit clip
+        int pixel_max = lookup_size - 1;
 
-        {for (int i = 0; i < 256; i++) {
-            accum_r[i] = 0;
-            accum_g[i] = 0;
-            accum_b[i] = 0;
-        }}
+        // worst case: 65536 for even 10 bits, too. Possible garbage
+        auto env2 = static_cast<IScriptEnvironment2*>(env);
+        int bufsize = real_lookup_size * sizeof(uint32_t);
+        // allocate 3x bufsize for R. G and B will share it
+        accum_r = static_cast<uint32_t*>(env2->Allocate(bufsize*3 , 16, AVS_NORMAL_ALLOC));
+        accum_g = accum_r + real_lookup_size;
+        accum_b = accum_g + real_lookup_size;
+        if (!accum_r)
+          env->ThrowError("RGBAdjust: Could not reserve memory.");
 
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x += t) {
-                accum_r[p[x + 2]]++;
-                accum_g[p[x + 1]]++;
-                accum_b[p[x]]++;
-            }
-            p += pitch;
+        for (int i = 0; i < lookup_size; i++) {
+          accum_r[i] = 0;
+          accum_g[i] = 0;
+          accum_b[i] = 0;
+        }
+
+        if(vi.IsPlanarRGB() || vi.IsPlanarRGBA())
+        {
+          const BYTE *p_g = frame->GetReadPtr(PLANAR_G);;
+          const BYTE *p_b = frame->GetReadPtr(PLANAR_B);
+          const BYTE *p_r = frame->GetReadPtr(PLANAR_R);
+          if (pixelsize == 1)
+            fill_accum_rgb_planar_c<uint8_t>(p_r, p_g, p_b, pitch, accum_r, accum_g, accum_b, w, h);
+          else
+            fill_accum_rgb_planar_c<uint16_t>(p_r, p_g, p_b, pitch, accum_r, accum_g, accum_b, w, h);
+        } else {
+          // packed RGB
+          const BYTE *srcp = frame->GetReadPtr();
+          const int pixel_step = vi.IsRGB24() || vi.IsRGB48() ? 3 : 4;
+
+          if (pixelsize == 1)
+            fill_accum_rgb_packed_c<uint8_t>(srcp, pitch, accum_r, accum_g, accum_b, w, h, pixel_step);
+          else
+            fill_accum_rgb_packed_c<uint16_t>(srcp, pitch, accum_r, accum_g, accum_b, w, h, pixel_step);
         }
 
         int pixels = vi.width*vi.height;
@@ -468,7 +1267,7 @@ PVideoFrame __stdcall RGBAdjust::GetFrame(int n, IScriptEnvironment* env)
         int At_256 = (pixels + 128) / 256; // When 1/256th of all pixels have been reached, trigger "Loose min/max"
 
 
-        {for (int i = 0; i < 256; i++) {
+        for (int i = 0; i < lookup_size; i++) {
             avg_r += (float)accum_r[i] * (float)i;
             avg_g += (float)accum_g[i] * (float)i;
             avg_b += (float)accum_b[i] * (float)i;
@@ -484,20 +1283,20 @@ PVideoFrame __stdcall RGBAdjust::GetFrame(int n, IScriptEnvironment* env)
             if (!Ahit_ming) { Amin_g += accum_g[i]; if (Amin_g > At_256) { Ahit_ming = true; Amin_g = i; } }
             if (!Ahit_minb) { Amin_b += accum_b[i]; if (Amin_b > At_256) { Ahit_minb = true; Amin_b = i; } }
 
-            if (!Ahit_maxr) { Amax_r += accum_r[255 - i]; if (Amax_r > At_256) { Ahit_maxr = true; Amax_r = 255 - i; } }
-            if (!Ahit_maxg) { Amax_g += accum_g[255 - i]; if (Amax_g > At_256) { Ahit_maxg = true; Amax_g = 255 - i; } }
-            if (!Ahit_maxb) { Amax_b += accum_b[255 - i]; if (Amax_b > At_256) { Ahit_maxb = true; Amax_b = 255 - i; } }
-        }}
+            if (!Ahit_maxr) { Amax_r += accum_r[pixel_max - i]; if (Amax_r > At_256) { Ahit_maxr = true; Amax_r = pixel_max - i; } }
+            if (!Ahit_maxg) { Amax_g += accum_g[pixel_max - i]; if (Amax_g > At_256) { Ahit_maxg = true; Amax_g = pixel_max - i; } }
+            if (!Ahit_maxb) { Amax_b += accum_b[pixel_max - i]; if (Amax_b > At_256) { Ahit_maxb = true; Amax_b = pixel_max - i; } }
+        }
 
         float Favg_r = avg_r / pixels;
         float Favg_g = avg_g / pixels;
         float Favg_b = avg_b / pixels;
 
-        {for (int i = 0; i < 256; i++) {
+        for (int i = 0; i < lookup_size; i++) {
             st_r += (float)accum_r[i] * (float(i - Favg_r)*(i - Favg_r));
             st_g += (float)accum_g[i] * (float(i - Favg_g)*(i - Favg_g));
             st_b += (float)accum_b[i] * (float(i - Favg_b)*(i - Favg_b));
-        }}
+        }
 
         float Fst_r = sqrt(st_r / pixels);
         float Fst_g = sqrt(st_g / pixels);
@@ -522,6 +1321,7 @@ PVideoFrame __stdcall RGBAdjust::GetFrame(int n, IScriptEnvironment* env)
             Amax_r, Amax_g, Amax_b
         );
         env->ApplyMessage(&frame, vi, text, vi.width / 4, 0xa0a0a0, 0, 0);
+        env2->Free(accum_r);
     }
     return frame;
 }
@@ -533,7 +1333,7 @@ AVSValue __cdecl RGBAdjust::Create(AVSValue args, void*, IScriptEnvironment* env
                        args[ 1].AsDblDef(1.0), args[ 2].AsDblDef(1.0), args[ 3].AsDblDef(1.0), args[ 4].AsDblDef(1.0),
                        args[ 5].AsDblDef(0.0), args[ 6].AsDblDef(0.0), args[ 7].AsDblDef(0.0), args[ 8].AsDblDef(0.0),
                        args[ 9].AsDblDef(1.0), args[10].AsDblDef(1.0), args[11].AsDblDef(1.0), args[12].AsDblDef(1.0),
-                       args[13].AsBool(false), args[14].AsBool(false), env );
+                       args[13].AsBool(false), args[14].AsBool(false), args[15].AsBool(false), args[16].AsString(""), env );
 }
 
 
@@ -632,20 +1432,97 @@ static bool ProcessPixelUnscaled(double X, double Y, double startHue, double end
 /**********************
 ******   Tweak    *****
 **********************/
+template<typename pixel_t, bool bpp10_14, bool dither>
+void Tweak::tweak_calc_luma(BYTE *srcp, int src_pitch, float minY, float maxY, int width, int height)
+{
+  float ditherval = 0.0f;
+  for (int y = 0; y < height; ++y) {
+    const int _y = (y << 4) & 0xf0;
+    for (int x = 0; x < width; ++x) {
+      if (dither)
+        ditherval = (ditherMap[(x & 0x0f) | _y] * dither_strength + bias_dither_luma) / (float)scale_dither_luma; // 0x00..0xFF -> -0.7F .. + 0.7F (+/- maxrange/512)
+      float y0 = reinterpret_cast<pixel_t *>(srcp)[x] - minY;
+      if(bpp10_14)
+        y0 = minY + (y0 + ditherval)*(float)dcont + (float)(1 << (bits_per_pixel - 8))*(float)dbright; // dbright parameter always 0..255. Scale to 0..255*4, 0.. 255*256
+      else if(pixelsize == 2)
+        y0 = minY + (y0 + ditherval)*(float)dcont + 256.0f*(float)dbright; // dbright parameter always 0..255. Scale to 0..255*4, 0.. 255*256
+      else if(pixelsize == 4)
+        y0 = minY + (y0 + ditherval)*(float)dcont + (float)dbright / 256.0f; // dbright parameter always 0..255, scale it to 0..1
+      else // pixelsize == 1
+        y0 = minY + ((y0 + ditherval)*(float)dcont + 1.0f*(float)dbright); // dbright parameter always 0..255. Scale to 0..255*4, 0.. 255*256
+
+      reinterpret_cast<pixel_t *>(srcp)[x] = (pixel_t)clamp(y0, minY, maxY);
+      /*
+      int y = int(((ii - range_low * scale_dither_luma)*_cont + _bright * scale_dither_luma + bias_dither_luma) / scale_dither_luma + range_low + 0.5); // 256 _cont & _bright param range
+      // coring, dither:
+      // int y = int(((ii - 16 * 256)*_cont + _bright * 256 - 127.5) / 256 + 16.5); // 256 _cont & _bright param range
+      // coring, no dither:
+      // int y = int(((ii - 16)*_cont + _bright) + 16.5); // 256 _cont & _bright param range
+      // no coring, dither:
+      // int y = int((ii *_cont + _bright * 256 - 127.5) / 256 + 0.5 ); // 256 _cont & _bright param range
+      // no coring, no dither:
+      // int y = int((ii *_cont + _bright) + 0.5 ); // 256 _cont & _bright param range
+      */
+    }
+    srcp += src_pitch;
+  }
+}
 
 Tweak::Tweak(PClip _child, double _hue, double _sat, double _bright, double _cont, bool _coring, bool _sse,
             double _startHue, double _endHue, double _maxSat, double _minSat, double p,
-            bool _dither, bool _realcalc, IScriptEnvironment* env)
+            bool _dither, bool _realcalc, double _dither_strength, IScriptEnvironment* env)
   : GenericVideoFilter(_child), coring(_coring), sse(_sse), dither(_dither), realcalc(_realcalc),
   dhue(_hue), dsat(_sat), dbright(_bright), dcont(_cont), dstartHue(_startHue), dendHue(_endHue),
-  dmaxSat(_maxSat), dminSat(_minSat), dinterp(p)
+  dmaxSat(_maxSat), dminSat(_minSat), dinterp(p), dither_strength((float)_dither_strength)
 {
   if (vi.IsRGB())
         env->ThrowError("Tweak: YUV data only (no RGB)");
 
+  pixelsize = vi.ComponentSize();
+  bits_per_pixel = vi.BitsPerComponent();
+  max_pixel_value = (1 << bits_per_pixel) - 1;
+  lut_size = 1 << bits_per_pixel;
+  int safe_luma_lookup_size = (pixelsize == 1) ? 256 : 65536; // avoids lut overflow in case of non-standard content of a 10 bit clip
+
+  get_limits(limits, bits_per_pixel); // tv range limits
+
+  scale_dither_luma = 1;
+  divisor_dither_luma = 1;
+  bias_dither_luma = 0.0;
+
+  scale_dither_chroma = 1;
+  divisor_dither_chroma = 1;
+  bias_dither_chroma = 0.0;
+
+  if (pixelsize == 4)
+    dither_strength /= 65536.0f; // same dither range as for a 16 bit clip
+  // Set dither_strength = 4.0 for 10 bits or 256.0 for 16 bits in order to have same dither range as for 8 bits
+  // Otherwise dithering is always +/- 0.5 at all bit-depth
+
+  if (dither) {
+    // lut scale settings
+    scale_dither_luma = 256; // lower 256 is dither value
+    divisor_dither_luma *= 256;
+    bias_dither_luma = -(256.0f * dither_strength - 1) / 2;
+    // original bias: -127.5 or -(256.0f * dither_strength - 1) / 2;
+    // dither strength =1 = (1 << (8-8))
+    // dither min: int( (0*1-127.5)/256+0.5) = -0.498046875 + 0.5 = 0,001953125
+    // dither max: int( (255*1-127.5)/256+0.5) = 0,998046875
+
+    // 16 bit: 32767,5
+    // dither strength =256 = (1 << (16-8))
+    // dither min: int( (0*256-32767,5)/256+0.5)   = -127,498046875
+    // dither max: int( (255*256-32767,5)/256+0.5) = 127,501953125
+
+
+    scale_dither_chroma = 16; // lower 16 is dither value
+    divisor_dither_chroma *= 16;
+    bias_dither_chroma = -(16.0f * dither_strength - (pixelsize==4 ? 1/256.0f : 1)) / 2; // -7.5
+  }
+
   // Flag to skip special processing if doing all pixels
   // If defaults, don't check for ranges, just do all
-  const bool allPixels = (_startHue == 0.0 && _endHue == 360.0 && _maxSat == 150.0 && _minSat == 0.0);
+  allPixels = (_startHue == 0.0 && _endHue == 360.0 && _maxSat == 150.0 && _minSat == 0.0);
 
 // The new "mapping" C code is faster than the iSSE code on my 3GHz P4HT - Make it optional
   if (sse && (!allPixels || coring || dither || !vi.IsYUY2()))
@@ -687,52 +1564,58 @@ Tweak::Tweak(PClip _child, double _hue, double _sat, double _bright, double _con
   Sin = (int) (SIN * 4096 + 0.5);
   Cos = (int) (COS * 4096 + 0.5);
 
-  if (vi.IsPlanar() && (vi.ComponentSize() > 1))
-    realcalc = true; // 16/32 bit: no lookup tables.
+  realcalc_luma = realcalc; // from parameter
+  realcalc_chroma = realcalc;
+  if (vi.IsPlanar() && (bits_per_pixel > 10))
+    realcalc_chroma = true;
+  if (vi.IsPlanar() && (bits_per_pixel == 32))
+    realcalc_luma = true;
+  // 8/10bit: chroma lut OK. 12+ bits: force no lookup tables.
+  // 8-16bit: luma lut OK. float: force no lookup tables.
 
   auto env2 = static_cast<IScriptEnvironment2*>(env);
 
-  if(!(realcalc && vi.IsPlanar()))
-  { // fill brightness/constrast lookup tables
-    size_t map_size = dither ? 256 * 256 : 256;
+  // fill brightness/constrast lookup tables
+  if(!(realcalc_luma && vi.IsPlanar()))
+  {
+    size_t map_size = pixelsize * safe_luma_lookup_size * scale_dither_luma;
+    // for 10-16 bit with dither: 2 * 65536 * 256 = 33 MByte
+    //               w/o  dither: 2 * 65536 = 128 KByte
     map = static_cast<uint8_t*>(env2->Allocate(map_size, 8, AVS_NORMAL_ALLOC));
     if (!map)
       env->ThrowError("Tweak: Could not reserve memory.");
     env->AtExit(free_buffer, map);
 
-    if (dither) {
-      if (coring) {
-        for (int i = 0; i < 256 * 256; i++) {
-          /* brightness and contrast */
-          int y = int(((i - 16 * 256)*_cont + _bright * 256 - 127.5) / 256 + 16.5);
-          map[i] = (BYTE)clamp(y, 16, 235);
+    if(bits_per_pixel>8 && bits_per_pixel<16) // make lut table safe for 10-14 bit garbage
+      std::fill_n((uint16_t *)map, map_size / pixelsize, max_pixel_value);
 
-        }
-      }
-      else {
-        for (int i = 0; i < 256 * 256; i++) {
-          /* brightness and contrast */
-          int y = int((i*_cont + _bright * 256 - 127.5) / 256 + 0.5);
-          map[i] = (BYTE)clamp(y, 0, 255);
-        }
-      }
-    }
-    else {
-      if (coring) {
-        for (int i = 0; i < 256; i++) {
-          /* brightness and contrast */
-          int y = int((i - 16)*_cont + _bright + 16.5);
-          map[i] = (BYTE)clamp(y, 16, 235);
+    int range_low = coring ? limits.tv_range_low : 0;
+    int range_high = coring ? limits.tv_range_hi_luma : max_pixel_value;
 
-        }
+    // dither_scale_luma = 1 if no dither, 256 if dither
+    /* create luma lut for brightness and contrast */
+    for (int i = 0; i < lut_size * scale_dither_luma; i++) {
+      int ii;
+      if(dither) {
+        ii = (i & 0xFFFFFF00) + (int)((i & 0xFF)*dither_strength);
+      } else {
+        ii = i;
       }
-      else {
-        for (int i = 0; i < 256; i++) {
-          /* brightness and contrast */
-          int y = int(i*_cont + _bright + 0.5);
-          map[i] = (BYTE)clamp(y, 0, 255);
-        }
-      }
+      // _bright param range is accepted as 0..256
+      int y = (int)(((ii - range_low * scale_dither_luma)*_cont + _bright * (1 << (bits_per_pixel - 8)) * scale_dither_luma + bias_dither_luma) / scale_dither_luma + range_low + 0.5);
+
+      // coring, dither:
+      // int y = int(((ii - 16 * 256)*_cont + _bright * 256 - 127.5) / 256 + 16.5); // 256 _cont & _bright param range
+      // coring, no dither:
+      // int y = int(((ii - 16)*_cont + _bright) + 16.5); // 256 _cont & _bright param range
+      // no coring, dither:
+      // int y = int((ii *_cont + _bright * 256 - 127.5) / 256 + 0.5 ); // 256 _cont & _bright param range
+      // no coring, no dither:
+      // int y = int((ii *_cont + _bright) + 0.5 ); // 256 _cont & _bright param range
+      if(pixelsize==1)
+        map[i] = (BYTE)clamp(y, range_low, range_high);
+      else
+        reinterpret_cast<uint16_t *>(map)[i] = (uint16_t)clamp(y, range_low, range_high);
     }
   }
   // 100% equals sat=119 (= maximal saturation of valid RGB (R=255,G=B=0)
@@ -742,58 +1625,158 @@ Tweak::Tweak(PClip _child, double _hue, double _sat, double _bright, double _con
 
   p *= 1.19; // Same units as minSat/maxSat
 
-  const int maxUV = coring ? 240 : 255;
-  const int minUV = coring ? 16 : 0;
-
-  if (!(realcalc && vi.IsPlanar()))
+  if (!(realcalc_chroma && vi.IsPlanar()))
   { // fill lookup tables for UV
-    size_t map_size = 256 * 256 * sizeof(uint16_t) * (dither ? 16 : 1);
-    mapUV = static_cast<uint16_t*>(env2->Allocate(map_size, 8, AVS_NORMAL_ALLOC));
+    size_t map_size = pixelsize * lut_size * lut_size * 2 * scale_dither_chroma;
+    // for 10 bit with dither: 2 * 1024 * 1024 * 2 * 4 = 4*64 MByte = 256M huh!
+    // for 10 bit w/o  dither: 2 * 1024 * 1024 * 2 = 64 MByte
+
+    mapUV = static_cast<uint16_t*>(env2->Allocate(map_size, 8, AVS_NORMAL_ALLOC)); // uint16_t for (U+V bytes), casted to uint32_t for (U+V words in non-8 bit)
     if (!mapUV)
       env->ThrowError("Tweak: Could not reserve memory.");
     env->AtExit(free_buffer, mapUV);
 
+    int range_low = coring ? limits.tv_range_low : 0;
+    int range_high = coring ? limits.tv_range_hi_chroma : max_pixel_value;
+
+    double uv_range_corr = 1.0 / (1 << (bits_per_pixel - 8));
+
     if (dither) {
-      for (int d = 0; d < 16; d++) {
-        for (int u = 0; u < 256; u++) {
-          const double destu = ((u << 4 | d) - 7.5) / 16.0 - 128.0;
-          for (int v = 0; v < 256; v++) {
-            const double destv = ((v << 4 | d) - 7.5) / 16.0 - 128.0;
+      // lut chroma, dither
+      for (int d = 0; d < scale_dither_chroma; d++) { // scale = 4    0..15 mini-dither
+        for (int u = 0; u < lut_size; u++) {
+          // dither_strength: optional correction for 8+ bit to have the same dither range as in 8 bits
+          const double destu = (((u << 4) + d*dither_strength) + bias_dither_chroma) / scale_dither_chroma - limits.middle_chroma; // scale_dither_chroma: 16
+          for (int v = 0; v < lut_size; v++) {
+            const double destv = (((v << 4) + d*dither_strength) + bias_dither_chroma) / scale_dither_chroma - limits.middle_chroma;
             int iSat = Sat;
-            if (allPixels || ProcessPixel(destv, destu, _startHue, _endHue, maxSat, minSat, p, iSat)) {
-              int du = int((destu*COS + destv*SIN) * iSat + 0x100) >> 9; // back from the extra 9 bits Sat precision
-              int dv = int((destv*COS - destu*SIN) * iSat + 0x100) >> 9;
-              du = clamp(du + 128, minUV, maxUV);
-              dv = clamp(dv + 128, minUV, maxUV);
-              mapUV[(u << 12) | (v << 4) | d] = (uint16_t)(du | (dv << 8));
+            if (allPixels || ProcessPixel(destv * uv_range_corr, destu * uv_range_corr, _startHue, _endHue, maxSat, minSat, p, iSat)) {
+              int du = (int)((destu*COS + destv*SIN) * iSat + 0x100) >> 9; // back from the extra 9 bits Sat precision
+              int dv = (int)((destv*COS - destu*SIN) * iSat + 0x100) >> 9;
+              du = clamp(du + limits.middle_chroma, range_low, range_high);
+              dv = clamp(dv + limits.middle_chroma, range_low, range_high);
+              if(pixelsize==1)
+                mapUV[(u << 12) | (v << 4) | d] = (uint16_t)(du | (dv << 8)); // U and V: two bytes
+              else
+                reinterpret_cast<uint32_t *>(mapUV)[(u << (4+bits_per_pixel)) | (v << 4) | d] = (uint32_t)(du | (dv << 16)); // U and V: two words
             }
             else {
-              mapUV[(u << 12) | (v << 4) | d] = (uint16_t)(clamp(u, minUV, maxUV) | (clamp(v, minUV, maxUV) << 8));
+              if(pixelsize==1)
+                mapUV[(u << 12) | (v << 4) | d] = (uint16_t)(clamp(u, range_low, range_high) | (clamp(v, range_low, range_high) << 8)); // U and V: two bytes
+              else
+                reinterpret_cast<uint32_t *>(mapUV)[(u << (4+bits_per_pixel)) | (v << 4) | d] = (uint32_t)(clamp(u, range_low, range_high) | ((clamp(v, range_low, range_high) << 16))); // U and V: two words
             }
           }
         }
       }
     }
     else {
-      for (int u = 0; u < 256; u++) {
-        const double destu = u - 128;
-        for (int v = 0; v < 256; v++) {
-          const double destv = v - 128;
+      // lut chroma, no dither
+      for (int u = 0; u < lut_size; u++) {
+        const double destu = u - limits.middle_chroma;
+        for (int v = 0; v < lut_size; v++) {
+          const double destv = v - limits.middle_chroma;
           int iSat = Sat;
-          if (allPixels || ProcessPixel(destv, destu, _startHue, _endHue, maxSat, minSat, p, iSat)) {
+          if (allPixels || ProcessPixel(destv * uv_range_corr, destu * uv_range_corr, _startHue, _endHue, maxSat, minSat, p, iSat)) {
             int du = int((destu*COS + destv*SIN) * iSat) >> 9; // back from the extra 9 bits Sat precision
             int dv = int((destv*COS - destu*SIN) * iSat) >> 9;
-            du = clamp(du + 128, minUV, maxUV);
-            dv = clamp(dv + 128, minUV, maxUV);
-            mapUV[(u << 8) | v] = (uint16_t)(du | (dv << 8));
+            du = clamp(du + limits.middle_chroma, range_low, range_high);
+            dv = clamp(dv + limits.middle_chroma, range_low, range_high);
+            if(pixelsize==1)
+              mapUV[(u << 8) | v] = (uint16_t)(du | (dv << 8)); // U and V: two bytes
+            else
+              reinterpret_cast<uint32_t *>(mapUV)[(u << bits_per_pixel) | v] = (uint32_t)(du | (dv << 16)); // U and V: two words
           }
           else {
-            mapUV[(u << 8) | v] = (uint16_t)(clamp(u, minUV, maxUV) | (clamp(v, minUV, maxUV) << 8));
+            if(pixelsize==1)
+              mapUV[(u << 8) | v] = (uint16_t)(clamp(u, range_low, range_high) | (clamp(v, range_low, range_high) << 8));  // U and V: two bytes
+            else
+              reinterpret_cast<uint32_t *>(mapUV)[(u << bits_per_pixel) | v] = (uint32_t)(clamp(u, range_low, range_high) | (clamp(v, range_low, range_high) << 16));  // U and V: two words
           }
         }
       }
     }
   }
+}
+
+
+template<typename pixel_t, bool dither>
+void Tweak::tweak_calc_chroma(BYTE *srcpu, BYTE *srcpv, int src_pitch, int width, int height, float minUV, float maxUV)
+{
+  // no lookup, alway true for 16/32 bit, optional for 8 bit
+  const double Hue = (dhue * PI) / 180.0;
+  // 100% equals sat=119 (= maximal saturation of valid RGB (R=255,G=B=0)
+  // 150% (=180) - 100% (=119) overshoot
+  const double minSat = 1.19 * dminSat;
+  const double maxSat = 1.19 * dmaxSat;
+
+  const double p = dinterp * 1.19; // Same units as minSat/maxSat
+
+  const int minUVi = (int)minUV;
+  const int maxUVi = (int)maxUV;
+
+  float ditherval = 0.0;
+  float u, v;
+  const float cosHue = (float)cos(Hue);
+  const float sinHue = (float)sin(Hue);
+  // no lut, realcalc, float internals
+  const float pixel_range = sizeof(pixel_t) == 4 ? 1.0f : (float)(max_pixel_value + 1);
+
+  double uv_range_corr = 255.0;
+
+  const bool isFloat = sizeof(pixel_t) == 4;
+
+  for (int y = 0; y < height; ++y) {
+    const int _y = (y << 2) & 0xC;
+    for (int x = 0; x < width; ++x) {
+      if (dither)
+        ditherval = ((float(ditherMap4[(x & 0x3) | _y]) * dither_strength + bias_dither_chroma) / scale_dither_chroma); // +/-0.5 on 0..255 range
+      pixel_t orig_u = reinterpret_cast<pixel_t *>(srcpu)[x];
+      pixel_t orig_v = reinterpret_cast<pixel_t *>(srcpv)[x] ;
+      u = isFloat ? (orig_u - limits.middle_chroma_f) : (orig_u - limits.middle_chroma);
+      v = isFloat ? (orig_v - limits.middle_chroma_f) : (orig_v - limits.middle_chroma);
+
+      u = (u + (dither ? ditherval : 0)) / (sizeof(pixel_t) == 4 ? 1.0f : pixel_range); // going from 0..1 to +/-0.5
+      v = (v + (dither ? ditherval : 0)) / (sizeof(pixel_t) == 4 ? 1.0f : pixel_range);
+
+      double dWorkSat = dsat; // init from original param
+      if(allPixels || ProcessPixelUnscaled(v * uv_range_corr, u * uv_range_corr, dstartHue, dendHue, maxSat, minSat, p, dWorkSat))
+      {
+        float du = ((u*cosHue + v*sinHue) * (float)dWorkSat);
+        float dv = ((v*cosHue - u*sinHue) * (float)dWorkSat);
+
+        if (isFloat) {
+          du = du + limits.middle_chroma_f;
+          dv = dv + limits.middle_chroma_f;
+        }
+        else {
+          // back to 0..1
+          du = du + 0.5f;
+          dv = dv + 0.5f;
+        }
+
+        if(isFloat) {
+          reinterpret_cast<pixel_t *>(srcpu)[x] = (pixel_t)clamp(du, minUV, maxUV);
+          reinterpret_cast<pixel_t *>(srcpv)[x] = (pixel_t)clamp(dv, minUV, maxUV);
+        } else {
+          reinterpret_cast<pixel_t *>(srcpu)[x] = (pixel_t)clamp((int)(du * pixel_range), minUVi, maxUVi);
+          reinterpret_cast<pixel_t *>(srcpv)[x] = (pixel_t)clamp((int)(dv * pixel_range), minUVi, maxUVi);
+        }
+      }
+      else {
+        if(isFloat) {
+          reinterpret_cast<pixel_t *>(srcpu)[x] = (pixel_t)clamp((float)orig_u, minUV, maxUV);
+          reinterpret_cast<pixel_t *>(srcpv)[x] = (pixel_t)clamp((float)orig_v, minUV, maxUV);
+        } else {
+          reinterpret_cast<pixel_t *>(srcpu)[x] = (pixel_t)clamp((int)(orig_u), minUVi, maxUVi);
+          reinterpret_cast<pixel_t *>(srcpv)[x] = (pixel_t)clamp((int)(orig_v), minUVi, maxUVi);
+        }
+      }
+    }
+    srcpu += src_pitch;
+    srcpv += src_pitch;
+  }
+
 }
 
 
@@ -850,80 +1833,88 @@ PVideoFrame __stdcall Tweak::GetFrame(int n, IScriptEnvironment* env)
                 srcp += src_pitch;
             }
         }
+        // YUY2 end
     }
     else if (vi.IsPlanar()) {
         // brightness and contrast
-        if (realcalc) // no lookup! alway true for 16/32 bit, optional for 8 bit
+        // no_lut and lut
+        int width = row_size / pixelsize;
+        if (realcalc_luma)
         {
-            int pixelsize = vi.ComponentSize();
-            int width = row_size / pixelsize;
+          // no luma lookup! alway true for 32 bit, optional for 8-16 bits
             float maxY;
             float minY;
-            float ditherval = 0.0f;
             // unique for each bit-depth, difference in the innermost loop (speed)
-            if (pixelsize == 1) { // uint8_t
-                maxY = coring ? 235.0f : 255.0f;
-                minY = coring ? 16.0f : 0;
-                for (int y = 0; y < height; ++y) {
-                    const int _y = (y << 4) & 0xf0;
-                    for (int x = 0; x < width; ++x) {
-                        if (dither)
-                            ditherval = (ditherMap[(x & 0x0f) | _y] - 127.5f) / 256.0f; // 0x00..0xFF -> -0.5 .. + 0.5 (+/- maxrange/512)
-                        float y0 = minY + ((srcp[x] - minY) + ditherval)*(float)dcont + (float)dbright; // dbright parameter always 0..255
-                        srcp[x] = (BYTE)clamp(y0, minY, maxY);
-                    }
-                    srcp += src_pitch;
-                }
+            maxY = (float)(coring ? limits.tv_range_hi_luma : max_pixel_value);
+            minY = (float)(coring ? limits.tv_range_low : 0);
 
-            } else if (pixelsize == 2) { // uint16_t
-                maxY = coring ? 235.0f * 256 : 65535.0f;
-                minY = coring ? 16.0f * 256 : 0;
-                for (int y = 0; y < height; ++y) {
-                    const int _y = (y << 4) & 0xf0;
-                    for (int x = 0; x < width; ++x) {
-                        if (dither) ditherval = (ditherMap[(x & 0x0f) | _y] - 127.5f); // 0x00..0xFF -> -0.7F .. + 0.7F (+/- maxrange/512)
-                        float y0 = (reinterpret_cast<uint16_t *>(srcp)[x] - minY);
-                        y0 = minY + ( (y0 + ditherval)*(float)dcont + 256.0f*(float)dbright); // dbright parameter always 0..255
-                        reinterpret_cast<uint16_t *>(srcp)[x] = (uint16_t)clamp(y0, minY, maxY);
-                    }
-                    srcp += src_pitch;
-                }
-            } else { // pixelsize 4: float
-                maxY = coring ? 235.0f / 256 : 1.0f; // scale into 0..1 range
-                minY = coring ? 16.0f / 256 : 0;
-                for (int y = 0; y < height; ++y) {
-                    const int _y = (y << 4) & 0xf0;
-                    for (int x = 0; x < width; ++x) {
-                        if (dither) ditherval = (ditherMap[(x & 0x0f) | _y] - 127.5f) / 65536.0f; // 0x00..0xFF -> -0.5 .. + 0.5 (+/- maxrange/512)
-                        float y0 = (reinterpret_cast<float *>(srcp)[x] - minY);
-                        y0 = minY + (y0 + ditherval)*(float)dcont + (float)dbright / 256.0f; // dbright parameter always 0..255, scale it to 0..1
-                        reinterpret_cast<float *>(srcp)[x] = (float)clamp(y0, minY, maxY);
-                    }
-                    srcp += src_pitch;
-                }
+            if(pixelsize == 1) {
+              if(dither)
+                tweak_calc_luma<uint8_t, false, true>(srcp, src_pitch, minY, maxY, width, height);
+              else
+                tweak_calc_luma<uint8_t, false, false>(srcp, src_pitch, minY, maxY, width, height);
+            } else if (bits_per_pixel < 16) {
+              if(dither)
+                tweak_calc_luma<uint16_t, true, true>(srcp, src_pitch, minY, maxY, width, height);
+              else
+                tweak_calc_luma<uint16_t, true, false>(srcp, src_pitch, minY, maxY, width, height);
+            } else if(bits_per_pixel == 16) {
+              if(dither)
+                tweak_calc_luma<uint16_t, false, true>(srcp, src_pitch, minY, maxY, width, height);
+              else
+                tweak_calc_luma<uint16_t, false, false>(srcp, src_pitch, minY, maxY, width, height);
+            } else { // float
+              maxY = coring ? 235.0f / 256 : 1.0f; // scale into 0..1 range
+              minY = coring ? 16.0f / 256 : 0;
+              if(dither)
+                tweak_calc_luma<float, false, true>(srcp, src_pitch, minY, maxY, width, height);
+              else
+                tweak_calc_luma<float, false, false>(srcp, src_pitch, minY, maxY, width, height);
             }
-
         }
         else {
-            // use lookup for 8 bit
+            /* brightness and contrast */
+            // use luma lookup for 8-16 bits
             if (dither) {
+              if(pixelsize==1) {
                 for (int y = 0; y < height; ++y) {
                     const int _y = (y << 4) & 0xf0;
-                    for (int x = 0; x < row_size; ++x) {
+                    for (int x = 0; x < width; ++x) {
                         /* brightness and contrast */
                         srcp[x] = map[srcp[x] << 8 | ditherMap[(x & 0x0f) | _y]];
                     }
                     srcp += src_pitch;
                 }
+              }
+              else { // pixelsize == 2
+                for (int y = 0; y < height; ++y) {
+                  const int _y = (y << 4) & 0xf0;
+                  for (int x = 0; x < width; ++x) {
+                    reinterpret_cast<uint16_t *>(srcp)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(srcp)[x] << 8 | ditherMap[(x & 0x0f) | _y]];
+                    // no clamp, map is safely sized
+                  }
+                  srcp += src_pitch;
+                }
+              }
             }
             else {
+              if(pixelsize==1) {
                 for (int y = 0; y < height; ++y) {
-                    for (int x = 0; x < row_size; ++x) {
-                        /* brightness and contrast */
+                    for (int x = 0; x < width; ++x) {
                         srcp[x] = map[srcp[x]];
                     }
                     srcp += src_pitch;
                 }
+              }
+              else { // pixelsize == 2
+                for (int y = 0; y < height; ++y) {
+                  for (int x = 0; x < width; ++x) {
+                    reinterpret_cast<uint16_t *>(srcp)[x] = reinterpret_cast<uint16_t *>(map)[reinterpret_cast<uint16_t *>(srcp)[x]];
+                    // no clamp, map is safely sized
+                  }
+                  srcp += src_pitch;
+                }
+              }
             }
         }
         // Y: brightness and contrast done
@@ -934,103 +1925,38 @@ PVideoFrame __stdcall Tweak::GetFrame(int n, IScriptEnvironment* env)
         BYTE * srcpv = src->GetWritePtr(PLANAR_V);
         row_size = src->GetRowSize(PLANAR_U);
         height = src->GetHeight(PLANAR_U);
+        width = row_size / pixelsize;
 
-        if (realcalc) {
-            // no lookup, alway true for 16/32 bit, optional for 8 bit
-            const double Hue = (dhue * PI) / 180.0;
-            // 100% equals sat=119 (= maximal saturation of valid RGB (R=255,G=B=0)
-            // 150% (=180) - 100% (=119) overshoot
-            const double minSat = 1.19 * dminSat;
-            const double maxSat = 1.19 * dmaxSat;
-
-            double p = dinterp * 1.19; // Same units as minSat/maxSat
-
-            int pixelsize = vi.ComponentSize();
-            int width = row_size / pixelsize;
-            double maxUV = coring ? 240.0f : 255.0f;
-            double minUV = coring ? 16.0f : 0;
-            double ditherval = 0.0;
-            double u, v;
-            double cosHue = cos(Hue);
-            double sinHue = sin(Hue);
-
-            // unique for each bit-depth, difference in the innermost loop (speed)
-            if (pixelsize==1)
-            {
-                for (int y = 0; y < height; ++y) {
-                    const int _y = (y << 2) & 0xC;
-                    for (int x = 0; x < width; ++x) {
-                        if (dither)
-                            ditherval = ((double(ditherMap4[(x & 0x3) | _y]) - 7.5) / 16) / 256;
-                        u = srcpu[x] / 256.0;
-                        v = srcpv[x] / 256.0;
-
-                        u = u + ditherval - 0.5; // going from 0..1 to +/-0.5
-                        v = v + ditherval - 0.5;
-                        double dWorkSat = dsat; // init from original param
-                        ProcessPixelUnscaled(v, u, dstartHue, dendHue, dmaxSat, dminSat, p, dWorkSat);
-                        double du = (u*cosHue + v*sinHue) * dWorkSat + 0.5f; // back to 0..1
-                        double dv = (v*cosHue - u*sinHue) * dWorkSat + 0.5f;
-                        srcpu[x] = (BYTE)clamp(du * 256.0, minUV, maxUV);
-                        srcpv[x] = (BYTE)clamp(dv * 256.0, minUV, maxUV);
-                    }
-                    srcpu += src_pitch;
-                    srcpv += src_pitch;
-                }
-            } else if (pixelsize==2) {
-                maxUV *= 256;
-                minUV *= 256;
-                for (int y = 0; y < height; ++y) {
-                    const int _y = (y << 2) & 0xC;
-                    for (int x = 0; x < width; ++x) {
-
-                        if (dither)
-                            ditherval = ((double(ditherMap4[(x & 0x3) | _y]) - 7.5) / 16) / 256;
-                        u = reinterpret_cast<uint16_t *>(srcpu)[x] / 65536.0f;
-                        v = reinterpret_cast<uint16_t *>(srcpv)[x] / 65536.0f;
-
-                        u = u + ditherval - 0.5; // going from 0..1 to +/-0.5
-                        v = v + ditherval - 0.5;
-                        double dWorkSat = dsat; // init from original param
-                        ProcessPixelUnscaled(v, u, dstartHue, dendHue, dmaxSat, dminSat, p, dWorkSat);
-                        double du = ((u*cosHue + v*sinHue) * dWorkSat) + 0.5; // back to 0..1
-                        double dv = ((v*cosHue - u*sinHue) * dWorkSat) + 0.5;
-                        reinterpret_cast<uint16_t *>(srcpu)[x] = (uint16_t)clamp(du * 65536.0, minUV, maxUV);
-                        reinterpret_cast<uint16_t *>(srcpv)[x] = (uint16_t)clamp(dv * 65536.0, minUV, maxUV);
-                    }
-                    srcpu += src_pitch;
-                    srcpv += src_pitch;
-                }
-            } else { // pixelsize==4 float
-                maxUV /= 256;
-                minUV /= 256;
-                for (int y = 0; y < height; ++y) {
-                    const int _y = (y << 2) & 0xC;
-                    for (int x = 0; x < width; ++x) {
-                        if (dither)
-                            ditherval = ((double(ditherMap4[(x & 0x3) | _y]) - 7.5) / 16) / 256;
-                        u = reinterpret_cast<float *>(srcpu)[x];
-                        v = reinterpret_cast<float *>(srcpv)[x];
-
-                        u = u + ditherval - 0.5; // going from 0..1 to +/-0.5
-                        v = v + ditherval - 0.5;
-                        double dWorkSat = dsat; // init from original param
-                        ProcessPixelUnscaled(v, u, dstartHue, dendHue, dmaxSat, dminSat, p, dWorkSat);
-                        double du = ((u*cosHue + v*sinHue) * dWorkSat) + 0.5; // back to 0..1
-                        double dv = ((v*cosHue - u*sinHue) * dWorkSat) + 0.5;
-                        reinterpret_cast<float *>(srcpu)[x] = (float)clamp(du/* * factor*/, minUV, maxUV);
-                        reinterpret_cast<float *>(srcpv)[x] = (float)clamp(dv/* * factor*/, minUV, maxUV);
-                    }
-                    srcpu += src_pitch;
-                    srcpv += src_pitch;
-                }
-            }
+        if (realcalc_chroma) {
+          // no lookup, alway true for > 10 bit, optional for 8/10 bit
+          float maxUV = (float)(coring ? limits.tv_range_hi_chroma : max_pixel_value);
+          float minUV = (float)(coring ? limits.tv_range_low : 0);
+          if(pixelsize == 1) {
+            if (dither)
+              tweak_calc_chroma<uint8_t, true>(srcpu, srcpv, src_pitch, width, height, minUV, maxUV);
+            else
+              tweak_calc_chroma<uint8_t, false>(srcpu, srcpv, src_pitch, width, height, minUV, maxUV);
+          } else if(pixelsize==2) {
+            if (dither)
+              tweak_calc_chroma<uint16_t, true>(srcpu, srcpv, src_pitch, width, height, minUV, maxUV);
+            else
+              tweak_calc_chroma<uint16_t, false>(srcpu, srcpv, src_pitch, width, height, minUV, maxUV);
+          } else { // pixelsize == 4
+            maxUV = coring ? limits.tv_range_hi_chroma_f : limits.full_range_hi_chroma_f;
+            minUV = coring ? limits.tv_range_low_chroma_f : limits.full_range_low_chroma_f;
+            if (dither)
+              tweak_calc_chroma<float, true>(srcpu, srcpv, src_pitch, width, height, minUV, maxUV);
+            else
+              tweak_calc_chroma<float, false>(srcpu, srcpv, src_pitch, width, height, minUV, maxUV);
+          }
         }
-        else {
+        else { // lookup UV
             if (dither) {
+              // lut + dither
+              if(pixelsize==1) {
                 for (int y = 0; y < height; ++y) {
                     const int _y = (y << 2) & 0xC;
-                    for (int x = 0; x < row_size; ++x) {
+                    for (int x = 0; x < width; ++x) {
                         const int _dither = ditherMap4[(x & 0x3) | _y];
                         /* hue and saturation */
                         const int u = srcpu[x];
@@ -1042,20 +1968,53 @@ PVideoFrame __stdcall Tweak::GetFrame(int n, IScriptEnvironment* env)
                     srcpu += src_pitch;
                     srcpv += src_pitch;
                 }
+              }
+              else { // pixelsize == 2
+                for (int y = 0; y < height; ++y) {
+                  const int _y = (y << 2) & 0xC;
+                  for (int x = 0; x < width; ++x) {
+                    const int _dither = ditherMap4[(x & 0x3) | _y]; // 0..15
+                    /* hue and saturation */
+                    const int u = clamp(0,(int)reinterpret_cast<uint16_t *>(srcpu)[x], max_pixel_value);
+                    const int v = clamp(0,(int)reinterpret_cast<uint16_t *>(srcpv)[x], max_pixel_value);
+                    const unsigned int mapped = reinterpret_cast<uint32_t *>(mapUV)[(u << (4+bits_per_pixel)) | (v << 4) | _dither];
+                    reinterpret_cast<uint16_t *>(srcpu)[x] = (uint16_t)(mapped & 0xffff);
+                    reinterpret_cast<uint16_t *>(srcpv)[x] = (uint16_t)(mapped >> 16);
+                  }
+                  srcpu += src_pitch;
+                  srcpv += src_pitch;
+                }
+              }
             }
             else {
+              // lut + no dither
+              if(pixelsize==1) {
                 for (int y = 0; y < height; ++y) {
-                    for (int x = 0; x < row_size; ++x) {
-                        /* hue and saturation */
-                        const int u = srcpu[x];
-                        const int v = srcpv[x];
-                        const int mapped = mapUV[(u << 8) | v];
-                        srcpu[x] = (BYTE)(mapped & 0xff);
-                        srcpv[x] = (BYTE)(mapped >> 8);
-                    }
-                    srcpu += src_pitch;
-                    srcpv += src_pitch;
+                      for (int x = 0; x < width; ++x) {
+                          /* hue and saturation */
+                          const int u = srcpu[x];
+                          const int v = srcpv[x];
+                          const int mapped = mapUV[(u << 8) | v];
+                          srcpu[x] = (BYTE)(mapped & 0xff);
+                          srcpv[x] = (BYTE)(mapped >> 8);
+                      }
+                      srcpu += src_pitch;
+                      srcpv += src_pitch;
+                  }
+              }
+              else { // pixelsize == 2
+                for (int y = 0; y < height; ++y) {
+                  for (int x = 0; x < width; ++x) {
+                    const int u = clamp(0,(int)reinterpret_cast<uint16_t *>(srcpu)[x], max_pixel_value);
+                    const int v = clamp(0,(int)reinterpret_cast<uint16_t *>(srcpv)[x], max_pixel_value);
+                    const unsigned int mapped = reinterpret_cast<uint32_t *>(mapUV)[(u << bits_per_pixel) | v];
+                    reinterpret_cast<uint16_t *>(srcpu)[x] = (uint16_t)(mapped & 0xffff);
+                    reinterpret_cast<uint16_t *>(srcpv)[x] = (uint16_t)(mapped >> 16);
+                  }
+                  srcpu += src_pitch;
+                  srcpv += src_pitch;
                 }
+              }
             }
         }
     }
@@ -1063,7 +2022,7 @@ PVideoFrame __stdcall Tweak::GetFrame(int n, IScriptEnvironment* env)
     return src;
 }
 
-AVSValue __cdecl Tweak::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl Tweak::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
     return new Tweak(args[0].AsClip(),
         args[1].AsDblDef(0.0),     // hue
@@ -1078,7 +2037,8 @@ AVSValue __cdecl Tweak::Create(AVSValue args, void* user_data, IScriptEnvironmen
         args[10].AsDblDef(0.0),    // minSat
         args[11].AsDblDef(16.0 / 1.19),// interp
         args[12].AsBool(false),    // dither
-        args[13].AsBool(false),    // realcalc: force no-lookup (pure double calc/pixel) for 8 bit
+        args[13].AsBool(false),    // realcalc: force no-lookup (pure float calculation pixel)
+        args[14].AsDblDef(1.0),    // dither_strength 1.0 = +/-0.5 on the 0.255 range, scaled for others
         env);
 }
 
@@ -1086,9 +2046,9 @@ AVSValue __cdecl Tweak::Create(AVSValue args, void* user_data, IScriptEnvironmen
 ******   MaskHS   *****
 **********************/
 
-MaskHS::MaskHS(PClip _child, double startHue, double endHue, double _maxSat, double _minSat, bool coring,
+MaskHS::MaskHS(PClip _child, double _startHue, double _endHue, double _maxSat, double _minSat, bool _coring, bool _realcalc,
     IScriptEnvironment* env)
-    : GenericVideoFilter(_child)
+    : GenericVideoFilter(_child), dstartHue(_startHue), dendHue(_endHue), dmaxSat(_maxSat), dminSat(_minSat), coring(_coring), realcalc(_realcalc)
 {
     if (vi.IsRGB())
         env->ThrowError("MaskHS: YUV data only (no RGB)");
@@ -1097,50 +2057,87 @@ MaskHS::MaskHS(PClip _child, double startHue, double endHue, double _maxSat, dou
         env->ThrowError("MaskHS: clip must contain chroma.");
     }
 
-    if (startHue < 0.0 || startHue >= 360.0)
+    if (dstartHue < 0.0 || dstartHue >= 360.0)
         env->ThrowError("MaskHS: startHue must be greater than or equal to 0.0 and less than 360.0");
 
-    if (endHue <= 0.0 || endHue > 360.0)
+    if (dendHue <= 0.0 || dendHue > 360.0)
         env->ThrowError("MaskHS: endHue must be greater than 0.0 and less than or equal to 360.0");
 
-    if (_minSat >= _maxSat)
+    if (dminSat >= dmaxSat)
         env->ThrowError("MaskHS: MinSat must be less than MaxSat");
 
-    if (_minSat < 0.0 || _minSat >= 150.0)
+    if (dminSat < 0.0 || dminSat >= 150.0)
         env->ThrowError("MaskHS: minSat must be greater than or equal to 0 and less than 150.");
 
-    if (_maxSat <= 0.0 || _maxSat > 150.0)
+    if (dmaxSat <= 0.0 || dmaxSat > 150.0)
         env->ThrowError("MaskHS: maxSat must be greater than 0 and less than or equal to 150.");
 
+    pixelsize = vi.ComponentSize();
+    bits_per_pixel = vi.BitsPerComponent();
+    max_pixel_value = (1 << bits_per_pixel) - 1;
+    lut_size = 1 << bits_per_pixel;
 
-    const BYTE maxY = coring ? 235 : 255;
-    const BYTE minY = coring ? 16 : 0;
+    get_limits(limits, bits_per_pixel);
+
+    mask_low = coring ? limits.tv_range_low : 0;
+    mask_high = coring ? limits.tv_range_hi_luma : max_pixel_value;
+
+    if (bits_per_pixel == 32) {
+      mask_low_f = coring ? limits.tv_range_low_luma_f : limits.full_range_low_luma_f;
+      mask_high_f = coring ? limits.tv_range_hi_luma_f : limits.full_range_hi_luma_f;
+    }
+
+    realcalc_chroma = realcalc;
+    if (vi.IsPlanar() && (bits_per_pixel > 12)) // max bitdepth is 12 for lut
+      realcalc_chroma = true;
 
     // 100% equals sat=119 (= maximal saturation of valid RGB (R=255,G=B=0)
     // 150% (=180) - 100% (=119) overshoot
-    const double minSat = 1.19 * _minSat;
-    const double maxSat = 1.19 * _maxSat;
+    minSat = 1.19 * dminSat;
+    maxSat = 1.19 * dmaxSat;
 
-    // apply mask
-    for (int u = 0; u < 256; u++) {
-        const double destu = u - 128;
-        for (int v = 0; v < 256; v++) {
-            const double destv = v - 128;
-            int iSat = 0; // won't be used in MaskHS; interpolation is skipped since p==0:
-            if (ProcessPixel(destv, destu, startHue, endHue, maxSat, minSat, 0.0, iSat)) {
-                mapY[(u << 8) | v] = maxY;
-            }
-            else {
-                mapY[(u << 8) | v] = minY;
-            }
-        }
-    }
+    if (!(realcalc_chroma && vi.IsPlanar()))
+    { // fill lookup tables for UV
+      size_t map_size = pixelsize * lut_size * lut_size;
+      // for  8 bit : 1 * 256 * 256 = 65536 byte
+      // for 10 bit : 2 * 1024 * 1024 = 2 MByte
+      // for 12 bit : 2 * 4096 * 4096 = 32 MByte
+      auto env2 = static_cast<IScriptEnvironment2*>(env);
+
+      mapUV = static_cast<uint8_t*>(env2->Allocate(map_size, 8, AVS_NORMAL_ALLOC)); // uint16_t for (U+V bytes), casted to uint32_t for (U+V words in non-8 bit)
+      if (!mapUV)
+        env->ThrowError("Tweak: Could not reserve memory.");
+      env->AtExit(free_buffer, mapUV);
+
+      // apply mask
+      double uv_range_corr = 1.0 / (1 << (bits_per_pixel - 8)); // no float here
+      for (int u = 0; u < lut_size; u++) {
+          const double destu = (u - limits.middle_chroma) * uv_range_corr; // processpixel's minSat and maxSat is for 256 range
+          int ushift = u << bits_per_pixel;
+          for (int v = 0; v < lut_size; v++) {
+              const double destv = (v - limits.middle_chroma) * uv_range_corr;
+              int iSat = 0; // won't be used in MaskHS; interpolation is skipped since p==0:
+              bool ppres = ProcessPixel(destv, destu, dstartHue, dendHue, maxSat, minSat, 0.0, iSat);
+              if(pixelsize==1)
+                  mapUV[ushift | v] = ppres ? mask_high : mask_low;
+              else
+                  reinterpret_cast<uint16_t *>(mapUV)[ushift | v] = ppres ? mask_high : mask_low;
+          }
+      }
+    } // end of lut calculation
     // #define MaskPointResizing
 #ifndef MaskPointResizing
     vi.width >>= vi.GetPlaneWidthSubsampling(PLANAR_U);
     vi.height >>= vi.GetPlaneHeightSubsampling(PLANAR_U);
 #endif
-    vi.pixel_type = VideoInfo::CS_Y8;
+    switch(bits_per_pixel) {
+    case 8: vi.pixel_type = VideoInfo::CS_Y8; break;
+    case 10: vi.pixel_type = VideoInfo::CS_Y10; break;
+    case 12: vi.pixel_type = VideoInfo::CS_Y12; break;
+    case 14: vi.pixel_type = VideoInfo::CS_Y14; break;
+    case 16: vi.pixel_type = VideoInfo::CS_Y16; break;
+    case 32: vi.pixel_type = VideoInfo::CS_Y32; break;
+    }
 }
 
 
@@ -1164,7 +2161,7 @@ PVideoFrame __stdcall MaskHS::GetFrame(int n, IScriptEnvironment* env)
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < row_size; x++) {
-                dstp[x] = mapY[((srcp[x * 4 + 1]) << 8) | srcp[x * 4 + 3]];
+                dstp[x] = mapUV[((srcp[x * 4 + 1]) << 8) | srcp[x * 4 + 3]];
             }
             srcp += src_pitch;
             dstp += dst_pitch;
@@ -1187,17 +2184,77 @@ PVideoFrame __stdcall MaskHS::GetFrame(int n, IScriptEnvironment* env)
         const int srcu_pitch = src->GetPitch(PLANAR_U);
         const uint8_t* srcpu = src->GetReadPtr(PLANAR_U);
         const uint8_t* srcpv = src->GetReadPtr(PLANAR_V);
-        const int row_sizeu = src->GetRowSize(PLANAR_U);
+        const int width = src->GetRowSize(PLANAR_U) / pixelsize;
         const int heightu = src->GetHeight(PLANAR_U);
 
 #ifndef MaskPointResizing
-        for (int y = 0; y < heightu; ++y) {
-            for (int x = 0; x < row_sizeu; ++x) {
-                dstp[x] = mapY[((srcpu[x]) << 8) | srcpv[x]];
+        if(realcalc_chroma) {
+          double uv_range_corr = (pixelsize == 4) ? 255.0 : 1.0 / (1 << (bits_per_pixel - 8));
+          if(pixelsize == 1) {
+            for (int y = 0; y < heightu; ++y) {
+              for (int x = 0; x < width; ++x) {
+                const double destu = srcpu[x] - limits.middle_chroma;
+                const double destv = srcpv[x] - limits.middle_chroma;
+                int iSat = 0; // won't be used in MaskHS; interpolation is skipped since p==0:
+                bool ppres = ProcessPixel(destv * uv_range_corr, destu * uv_range_corr, dstartHue, dendHue, maxSat, minSat, 0.0, iSat);
+                dstp[x] = ppres ? mask_high : mask_low;
+              }
+              dstp += dst_pitch;
+              srcpu += srcu_pitch;
+              srcpv += srcu_pitch;
             }
-            dstp += dst_pitch;
-            srcpu += srcu_pitch;
-            srcpv += srcu_pitch;
+          }
+          else if (pixelsize == 2) {
+            for (int y = 0; y < heightu; ++y) {
+              for (int x = 0; x < width; ++x) {
+                const double destu = (reinterpret_cast<const uint16_t *>(srcpu)[x] - limits.middle_chroma);
+                const double destv = (reinterpret_cast<const uint16_t *>(srcpv)[x] - limits.middle_chroma);
+                int iSat = 0; // won't be used in MaskHS; interpolation is skipped since p==0:
+                bool ppres = ProcessPixel(destv * uv_range_corr, destu * uv_range_corr, dstartHue, dendHue, maxSat, minSat, 0.0, iSat);
+                reinterpret_cast<uint16_t *>(dstp)[x] = ppres ? mask_high : mask_low;
+              }
+              dstp += dst_pitch;
+              srcpu += srcu_pitch;
+              srcpv += srcu_pitch;
+            }
+          } else { // pixelsize == 4
+            for (int y = 0; y < heightu; ++y) {
+              for (int x = 0; x < width; ++x) {
+                const double destu = (reinterpret_cast<const float *>(srcpu)[x] - limits.middle_chroma_f);
+                const double destv = (reinterpret_cast<const float *>(srcpv)[x] - limits.middle_chroma_f);
+                int iSat = 0; // won't be used in MaskHS; interpolation is skipped since p==0:
+                bool ppres = ProcessPixel(destv * uv_range_corr, destu * uv_range_corr, dstartHue, dendHue, maxSat, minSat, 0.0, iSat);
+                reinterpret_cast<float *>(dstp)[x] = ppres ? mask_high_f : mask_low_f;
+              }
+              dstp += dst_pitch;
+              srcpu += srcu_pitch;
+              srcpv += srcu_pitch;
+            }
+          }
+
+        } else {
+          // use LUT
+          if(pixelsize==1) {
+            for (int y = 0; y < heightu; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    dstp[x] = mapUV[((srcpu[x]) << 8) | srcpv[x]];
+                }
+                dstp += dst_pitch;
+                srcpu += srcu_pitch;
+                srcpv += srcu_pitch;
+            }
+          }
+          else if (pixelsize == 2) {
+            for (int y = 0; y < heightu; ++y) {
+              for (int x = 0; x < width; ++x) {
+                reinterpret_cast<uint16_t *>(dstp)[x] =
+                  reinterpret_cast<uint16_t *>(mapUV)[((reinterpret_cast<const uint16_t *>(srcpu)[x]) << bits_per_pixel) | reinterpret_cast<const uint16_t *>(srcpv)[x]];
+              }
+              dstp += dst_pitch;
+              srcpu += srcu_pitch;
+              srcpv += srcu_pitch;
+            }
+          } // no lut for float (and for 14-16 bit)
         }
 #else
         const int swidth = child->GetVideoInfo().GetPlaneWidthSubsampling(PLANAR_U);
@@ -1230,7 +2287,7 @@ PVideoFrame __stdcall MaskHS::GetFrame(int n, IScriptEnvironment* env)
 
 
 
-AVSValue __cdecl MaskHS::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl MaskHS::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
     return new MaskHS(args[0].AsClip(),
         args[1].AsDblDef(0.0),    // startHue
@@ -1238,6 +2295,7 @@ AVSValue __cdecl MaskHS::Create(AVSValue args, void* user_data, IScriptEnvironme
         args[3].AsDblDef(150.0),    // maxSat
         args[4].AsDblDef(0.0),    // minSat
         args[5].AsBool(false),      // coring
-        env);
+        args[6].AsBool(false),      // realcalc
+      env);
 }
 

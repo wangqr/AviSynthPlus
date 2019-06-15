@@ -15,6 +15,10 @@ list (APPEND SourceFiles
 )
 add_library(${ProjectName} SHARED ${SourceFiles})
 set_target_properties(${ProjectName} PROPERTIES "OUTPUT_NAME" ${PluginName})
+if (MINGW)
+  set_target_properties(${ProjectName} PROPERTIES PREFIX "")
+  set_target_properties(${ProjectName} PROPERTIES IMPORT_PREFIX "")
+endif()
 
 if( CMAKE_SIZEOF_VOID_P EQUAL 4 ) # 32-bit
   # Specify include directories
@@ -40,3 +44,6 @@ if (MSVC_IDE)
     COMMAND xcopy /Y \"$(TargetPath)\" \"${CMAKE_BINARY_DIR}/Output/plugins\"
   )
 endif()
+
+INSTALL(TARGETS "${ProjectName}"
+        DESTINATION "${CMAKE_INSTALL_PREFIX}/${LIB_INSTALL_DIR}/avisynth")

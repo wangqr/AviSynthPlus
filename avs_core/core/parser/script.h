@@ -191,6 +191,7 @@ AVSValue BitChg(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue BitClr(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue BitSet(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue BitTst(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue BitSetCount(AVSValue args, void*, IScriptEnvironment* env);
 
 AVSValue UCase(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue LCase(AVSValue args, void*, IScriptEnvironment* env);
@@ -203,6 +204,10 @@ AVSValue FindStr(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue FillStr(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue StrCmp(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue StrCmpi(AVSValue args, void*, IScriptEnvironment* env);
+
+AVSValue TrimAll(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue TrimLeft(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue TrimRight(AVSValue args, void*, IScriptEnvironment* env);
 
 AVSValue Rand(AVSValue args, void* user_data, IScriptEnvironment* env);
 
@@ -230,6 +235,9 @@ AVSValue AvsMax(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue ScriptName(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue ScriptFile(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue ScriptDir (AVSValue args, void*, IScriptEnvironment* env);
+AVSValue ScriptNameUtf8(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue ScriptFileUtf8(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue ScriptDirUtf8(AVSValue args, void*, IScriptEnvironment* env);
 
 AVSValue AddAutoloadDir (AVSValue args, void*, IScriptEnvironment* env);
 AVSValue ClearAutoloadDirs (AVSValue args, void*, IScriptEnvironment* env);
@@ -252,5 +260,27 @@ AVSValue BitsPerComponent(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue IsYUVA(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue IsPlanarRGB(AVSValue args, void*, IScriptEnvironment* env);
 AVSValue IsPlanarRGBA(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue ColorSpaceNameToPixelType(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue NumComponents(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue HasAlpha(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue IsPackedRGB(AVSValue args, void*, IScriptEnvironment* env);
+
+AVSValue ReplaceStr(AVSValue args, void*, IScriptEnvironment* env); // avs+ 161230
+AVSValue IsVideoFloat(AVSValue args, void*, IScriptEnvironment* env); // avs+ 170309
+
+AVSValue GetProcessInfo(AVSValue args, void*, IScriptEnvironment* env); // avs+ 170526
+AVSValue StrToUtf8(AVSValue args, void*, IScriptEnvironment* env); // avs+ 170601
+AVSValue StrFromUtf8(AVSValue args, void*, IScriptEnvironment* env); // avs+ 170601
+
+AVSValue IsFloatUvZeroBased(AVSValue args, void*, IScriptEnvironment* env); // avs+ 180516
+AVSValue BuildPixelType(AVSValue args, void*, IScriptEnvironment* env); // avs+ 180517
+AVSValue VarExist(AVSValue args, void*, IScriptEnvironment* env); // avs+ 180606
+
+#ifdef NEW_AVSVALUE
+AVSValue ArrayCreate(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue IsArray(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue ArrayGet(AVSValue args, void*, IScriptEnvironment* env);
+AVSValue ArraySize(AVSValue args, void*, IScriptEnvironment* env);
+#endif
 
 #endif  // __Script_H__

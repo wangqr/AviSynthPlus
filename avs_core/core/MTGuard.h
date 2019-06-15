@@ -26,7 +26,6 @@ private:
   std::unique_ptr<const FilterConstructor> FilterCtor;
   const MtMode MTMode;
 
-
 public:
   ~MTGuard();
   MTGuard(PClip firstChild, MtMode mtmode, std::unique_ptr<const FilterConstructor> &&funcCtor, InternalEnvironment* env);
@@ -44,17 +43,20 @@ public:
   static PClip Create(MtMode mode, PClip filterInstance, std::unique_ptr<const FilterConstructor> funcCtor, InternalEnvironment* env);
 };
 
+#ifdef USE_MT_GUARDEXIT
 class MTGuardExit : public NonCachedGenericVideoFilter
 {
 private:
     MTGuard *guard = nullptr;
+    const char *name;
 
 public:
-    MTGuardExit(const PClip &clip);
+    MTGuardExit(const PClip &clip, const char *_name);
     void Activate(PClip &with_guard);
 
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
     void __stdcall GetAudio(void* buf, __int64 start, __int64 count, IScriptEnvironment* env);
 };
+#endif
 
 #endif // _AVS_MTGUARD_H

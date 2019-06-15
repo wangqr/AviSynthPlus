@@ -40,6 +40,7 @@
 
 
 #include "merge.h"
+#include "merge_avx2.h"
 #include "../core/internal.h"
 #include <emmintrin.h>
 #include <smmintrin.h>
@@ -355,17 +356,17 @@ static void replace_luma_yuy2_c(BYTE *src, const BYTE *luma, int pitch, int luma
  *            average_plane
  * -----------------------------------
  */
-template<typename pixel_size>
-static void average_plane_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int width, int height) {
+template<typename pixel_t>
+static void average_plane_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height) {
   // width is RowSize here
-  int mod16_width = width / 16 * 16;
+  int mod16_width = rowsize / 16 * 16;
 
   for(int y = 0; y < height; y++) {
     for(int x = 0; x < mod16_width; x+=16) {
       __m128i src1  = _mm_load_si128(reinterpret_cast<const __m128i*>(p1+x));
       __m128i src2  = _mm_load_si128(reinterpret_cast<const __m128i*>(p2+x));
       __m128i dst;
-      if(sizeof(pixel_size)==1)
+      if constexpr(sizeof(pixel_t) == 1)
         dst  = _mm_avg_epu8(src1, src2); // 8 pixels
       else // pixel_size == 2
         dst = _mm_avg_epu16(src1, src2); // 4 pixels
@@ -373,9 +374,9 @@ static void average_plane_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pi
       _mm_store_si128(reinterpret_cast<__m128i*>(p1+x), dst);
     }
 
-    if (mod16_width != width) {
-      for (size_t x = mod16_width / sizeof(pixel_size); x < width/sizeof(pixel_size); ++x) {
-        reinterpret_cast<pixel_size *>(p1)[x] = (int(reinterpret_cast<pixel_size *>(p1)[x]) + reinterpret_cast<const pixel_size *>(p2)[x] + 1) >> 1;
+    if (mod16_width != rowsize) {
+      for (size_t x = mod16_width / sizeof(pixel_t); x < rowsize/sizeof(pixel_t); ++x) {
+        reinterpret_cast<pixel_t *>(p1)[x] = (int(reinterpret_cast<pixel_t *>(p1)[x]) + reinterpret_cast<const pixel_t *>(p2)[x] + 1) >> 1;
       }
     }
     p1 += p1_pitch;
@@ -384,26 +385,26 @@ static void average_plane_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pi
 }
 
 #ifdef X86_32
-template<typename pixel_size>
-static void average_plane_isse(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int width, int height) {
+template<typename pixel_t>
+static void average_plane_isse(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height) {
   // width is RowSize here
-  int mod8_width = width / 8 * 8;
+  int mod8_width = rowsize / 8 * 8;
 
   for(int y = 0; y < height; y++) {
     for(int x = 0; x < mod8_width; x+=8) {
       __m64 src1 = *reinterpret_cast<const __m64*>(p1+x);
       __m64 src2 = *reinterpret_cast<const __m64*>(p2+x);
       __m64 dst;
-      if(sizeof(pixel_size)==1)
+      if constexpr(sizeof(pixel_t) == 1)
         dst = _mm_avg_pu8(src1, src2);  // 8 pixels
       else // pixel_size == 2
         dst = _mm_avg_pu16(src1, src2); // 4 pixels
       *reinterpret_cast<__m64*>(p1+x) = dst;
     }
 
-    if (mod8_width != width) {
-      for (size_t x = mod8_width / sizeof(pixel_size); x < width / sizeof(pixel_size); ++x) {
-        reinterpret_cast<pixel_size *>(p1)[x] = (int(reinterpret_cast<pixel_size *>(p1)[x]) + reinterpret_cast<const pixel_size *>(p2)[x] + 1) >> 1;
+    if (mod8_width != rowsize) {
+      for (size_t x = mod8_width / sizeof(pixel_t); x < rowsize / sizeof(pixel_t); ++x) {
+        reinterpret_cast<pixel_t *>(p1)[x] = (int(reinterpret_cast<pixel_t *>(p1)[x]) + reinterpret_cast<const pixel_t *>(p2)[x] + 1) >> 1;
       }
     }
     p1 += p1_pitch;
@@ -414,11 +415,11 @@ static void average_plane_isse(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pi
 #endif
 
 // for uint8_t and uint16_t
-template<typename pixel_size>
+template<typename pixel_t>
 static void average_plane_c(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height) {
   for (int y = 0; y < height; ++y) {
-    for (size_t x = 0; x < rowsize / sizeof(pixel_size); ++x) {
-      reinterpret_cast<pixel_size *>(p1)[x] = (int(reinterpret_cast<pixel_size *>(p1)[x]) + reinterpret_cast<const pixel_size *>(p2)[x] + 1) >> 1;
+    for (size_t x = 0; x < rowsize / sizeof(pixel_t); ++x) {
+      reinterpret_cast<pixel_t *>(p1)[x] = (int(reinterpret_cast<pixel_t *>(p1)[x]) + reinterpret_cast<const pixel_t *>(p2)[x] + 1) >> 1;
     }
     p1 += p1_pitch;
     p2 += p2_pitch;
@@ -427,13 +428,11 @@ static void average_plane_c(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch
 // for float
 static void average_plane_c_float(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height) {
 
-  float *fp1 = reinterpret_cast<float *>(p1);
-  const float *fp2 = reinterpret_cast<const float *>(p2);
   size_t rs = rowsize / sizeof(float);
 
   for (int y = 0; y < height; ++y) {
     for (size_t x = 0; x < rs; ++x) {
-      fp1[x] = (fp1[x] + fp2[x]) / 2.0f;
+      reinterpret_cast<float *>(p1)[x] = (reinterpret_cast<float *>(p1)[x] + reinterpret_cast<const float *>(p2)[x]) / 2.0f;
     }
     p1 += p1_pitch;
     p2 += p2_pitch;
@@ -444,45 +443,51 @@ static void average_plane_c_float(BYTE *p1, const BYTE *p2, int p1_pitch, int p2
  *       weighted_merge_planar
  * -----------------------------------
  */
-void weighted_merge_planar_uint16_sse41(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int width, int height, int weight, int invweight) {
+
+template<bool lessthan16bit>
+void weighted_merge_planar_uint16_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height, float weight_f, int weight_i, int invweight_i) {
+  AVS_UNUSED(weight_f);
   __m128i round_mask = _mm_set1_epi32(0x4000);
   __m128i zero = _mm_setzero_si128();
-  __m128i weightmask = _mm_set1_epi32(weight);
-  __m128i invweightmask = _mm_set1_epi32(invweight);
+  __m128i mask = _mm_set1_epi32((weight_i << 16) + invweight_i);
 
-  int wMod16 = (width / 16) * 16;
+  int wMod16 = (rowsize / 16) * 16;
+  const __m128i signed_shifter = _mm_set1_epi16(-32768);
 
   for (int y = 0; y < height; y++) {
     for (int x = 0; x < wMod16; x += 16) {
-      __m128i px1 = _mm_stream_load_si128(reinterpret_cast<__m128i*>(p1 + x)); // y7 y6 y5 y4 y3 y2 y1 y0
-      __m128i px2 = _mm_stream_load_si128(const_cast<__m128i*>(reinterpret_cast<const __m128i*>(p2 + x))); // Y7 Y6 Y5 Y4 Y3 Y2 Y1 Y0
+      __m128i px1 = _mm_load_si128(reinterpret_cast<const __m128i*>(p1 + x)); // y7y6 y5y4 y3y2 y1y0
+      __m128i px2 = _mm_load_si128(reinterpret_cast<const __m128i*>(p2 + x)); // Y7Y6 Y5Y4 Y3Y2 Y1Y0
 
-      __m128i p1_0123 = _mm_unpacklo_epi16(px1, zero); // y3 y2 y1 y0   4*int
-      __m128i p1_4567 = _mm_unpackhi_epi16(px1, zero); // y7 y6 y5 y4   4*int
-      __m128i p2_0123 = _mm_unpacklo_epi16(px2, zero);
-      __m128i p2_4567 = _mm_unpackhi_epi16(px2, zero);
+      if (!lessthan16bit) {
+        px1 = _mm_add_epi16(px1, signed_shifter);
+        px2 = _mm_add_epi16(px2, signed_shifter);
+      }
 
-      // mullo: sse4
-      p1_0123 = _mm_mullo_epi32(p1_0123, invweightmask); // 4x(32bit x 32bit = 32 bit)
-      p1_4567 = _mm_mullo_epi32(p1_4567, invweightmask);
-      p2_0123 = _mm_mullo_epi32(p2_0123, weightmask);
-      p2_4567 = _mm_mullo_epi32(p2_4567, weightmask);
+      __m128i p03 = _mm_unpacklo_epi16(px1, px2); // Y3y3 Y2y2 Y1y1 Y0y0
+      __m128i p47 = _mm_unpackhi_epi16(px1, px2); // Y7y7 Y6y6 Y5y5 Y4y4
 
-      p1_0123 = _mm_add_epi32(p1_0123, p2_0123); // 4x(32bit + 32bit = 32 bit)
-      p1_4567 = _mm_add_epi32(p1_4567, p2_4567);
+      p03 = _mm_madd_epi16(p03, mask); // px1 * invweight + px2 * weight
+      p47 = _mm_madd_epi16(p47, mask);
 
-      p1_0123 = _mm_add_epi32(p1_0123, round_mask); // 4x(32bit + 32bit = 32 bit)
-      p1_4567 = _mm_add_epi32(p1_4567, round_mask);
+      p03 = _mm_add_epi32(p03, round_mask);
+      p47 = _mm_add_epi32(p47, round_mask);
 
-      p1_0123 = _mm_srli_epi32(p1_0123, 15);
-      p1_4567 = _mm_srli_epi32(p1_4567, 15);
+      p03 = _mm_srai_epi32(p03, 15);
+      p47 = _mm_srai_epi32(p47, 15);
 
-      __m128i result = _mm_packus_epi32(p1_0123, p1_4567); // packus: SSE4.1
-      _mm_stream_si128(reinterpret_cast<__m128i*>(p1 + x), result);
+      auto p07 = _mm_packs_epi32(p03, p47);
+      if (!lessthan16bit) {
+        p07 = _mm_add_epi16(p07, signed_shifter);
+      }
+
+      __m128i result = p07;
+
+      _mm_store_si128(reinterpret_cast<__m128i*>(p1 + x), result);
     }
 
-    for (size_t x = wMod16 / sizeof(uint16_t); x < width / sizeof(uint16_t); x++) {
-      reinterpret_cast<uint16_t *>(p1)[x] = (reinterpret_cast<uint16_t *>(p1)[x] * invweight + reinterpret_cast<const uint16_t *>(p2)[x] * weight + 16384) >> 15;
+    for (size_t x = wMod16 / sizeof(uint16_t); x < rowsize / sizeof(uint16_t); x++) {
+      reinterpret_cast<uint16_t *>(p1)[x] = (reinterpret_cast<uint16_t *>(p1)[x] * invweight_i + reinterpret_cast<const uint16_t *>(p2)[x] * weight_i + 16384) >> 15;
     }
 
     p1 += p1_pitch;
@@ -490,13 +495,14 @@ void weighted_merge_planar_uint16_sse41(BYTE *p1, const BYTE *p2, int p1_pitch, 
   }
 }
 
-void weighted_merge_planar_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int width, int height, int weight, int invweight) {
+void weighted_merge_planar_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height, float weight_f, int weight_i, int invweight_i) {
+  AVS_UNUSED(weight_f);
   // 8 bit only. SSE2 has weak support for unsigned 16 bit
   __m128i round_mask = _mm_set1_epi32(0x4000);
   __m128i zero = _mm_setzero_si128();
-  __m128i mask = _mm_set_epi16(weight, invweight, weight, invweight, weight, invweight, weight, invweight);
+  __m128i mask = _mm_set_epi16(weight_i, invweight_i, weight_i, invweight_i, weight_i, invweight_i, weight_i, invweight_i);
 
-  int wMod16 = (width / 16) * 16;
+  int wMod16 = (rowsize / 16) * 16;
 
   for (int y = 0; y < height; y++) {
     for (int x = 0; x < wMod16; x += 16) {
@@ -534,8 +540,66 @@ void weighted_merge_planar_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_p
       _mm_store_si128(reinterpret_cast<__m128i*>(p1 + x), result);
     }
 
-    for (size_t x = wMod16 / sizeof(uint8_t); x < width / sizeof(uint8_t); x++) {
-      reinterpret_cast<uint8_t *>(p1)[x] = (reinterpret_cast<uint8_t *>(p1)[x] * invweight + reinterpret_cast<const uint8_t *>(p2)[x] * weight + 16384) >> 15;
+    for (size_t x = wMod16 / sizeof(uint8_t); x < rowsize / sizeof(uint8_t); x++) {
+      reinterpret_cast<uint8_t *>(p1)[x] = (reinterpret_cast<uint8_t *>(p1)[x] * invweight_i + reinterpret_cast<const uint8_t *>(p2)[x] * weight_i + 16384) >> 15;
+    }
+
+    p1 += p1_pitch;
+    p2 += p2_pitch;
+  }
+}
+
+
+void weighted_merge_planar_sse2_float(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height, float weight_f, int weight_i, int invweight_i) {
+  AVS_UNUSED(weight_i);
+  AVS_UNUSED(invweight_i);
+
+  float invweight_f = 1.0f - weight_f;
+  auto mask = _mm_set1_ps(weight_f);
+
+  int wMod16 = (rowsize / 16) * 16;
+
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < wMod16; x += 16) {
+      auto px1 = _mm_load_ps(reinterpret_cast<const float*>(p1 + x));
+      auto px2 = _mm_load_ps(reinterpret_cast<const float*>(p2 + x));
+      // p1:dst p2:src
+      // ( 1- mask) * dst + mask * src =
+      // dst - dst * mask + src * mask =
+      // dst + mask * (src - dst)
+      auto diff = _mm_sub_ps(px2, px1);
+      auto tmp = _mm_mul_ps(diff, mask); // (p2-p1)*mask
+      auto result = _mm_add_ps(tmp, px1); // +dst
+
+      _mm_store_ps(reinterpret_cast<float *>(p1 + x), result);
+    }
+
+    for (size_t x = wMod16 / sizeof(float); x < rowsize / sizeof(float); x++) {
+      reinterpret_cast<float *>(p1)[x] = reinterpret_cast<float *>(p1)[x] * invweight_f + reinterpret_cast<const float *>(p2)[x] * weight_f;
+    }
+
+    p1 += p1_pitch;
+    p2 += p2_pitch;
+  }
+}
+
+void average_plane_sse2_float(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height) {
+  auto OneHalf = _mm_set1_ps(0.5f);
+
+  int wMod16 = (rowsize / 16) * 16;
+
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < wMod16; x += 16) {
+      auto px1 = _mm_load_ps(reinterpret_cast<const float*>(p1 + x));
+      auto px2 = _mm_load_ps(reinterpret_cast<const float*>(p2 + x));
+
+      auto result = _mm_mul_ps(_mm_add_ps(px1, px2), OneHalf); //
+
+      _mm_store_ps(reinterpret_cast<float *>(p1 + x), result);
+    }
+
+    for (size_t x = wMod16 / sizeof(float); x < rowsize / sizeof(float); x++) {
+      reinterpret_cast<float *>(p1)[x] = (reinterpret_cast<float *>(p1)[x] + reinterpret_cast<const float *>(p2)[x]) * 0.5f;
     }
 
     p1 += p1_pitch;
@@ -544,12 +608,12 @@ void weighted_merge_planar_sse2(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_p
 }
 
 #ifdef X86_32
-void weighted_merge_planar_mmx(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int width, int height, int weight, int invweight) {
+void weighted_merge_planar_mmx(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height, float weight_f, int weight_i, int invweight_i) {
   __m64 round_mask = _mm_set1_pi32(0x4000);
   __m64 zero = _mm_setzero_si64();
-  __m64 mask = _mm_set_pi16(weight, invweight, weight, invweight);
+  __m64 mask = _mm_set_pi16(weight_i, invweight_i, weight_i, invweight_i);
 
-  int wMod8 = (width/8) * 8;
+  int wMod8 = (rowsize/8) * 8;
 
   for (int y = 0; y < height; y++) {
     for (int x = 0; x < wMod8; x += 8) {
@@ -587,8 +651,8 @@ void weighted_merge_planar_mmx(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pi
       *reinterpret_cast<__m64*>(p1+x) = result;
     }
 
-    for (int x = wMod8; x < width; x++) {
-      p1[x] = (p1[x]*invweight + p2[x]*weight + 16384) >> 15;
+    for (int x = wMod8; x < rowsize; x++) {
+      p1[x] = (p1[x]*invweight_i + p2[x]*weight_i + 16384) >> 15;
     }
 
     p1 += p1_pitch;
@@ -599,26 +663,27 @@ void weighted_merge_planar_mmx(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pi
 #endif
 
 
-template<typename pixel_size>
-void weighted_merge_planar_c(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch,int rowsize, int height, int weight, int invweight) {
+template<typename pixel_t>
+void weighted_merge_planar_c(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch,int rowsize, int height, float weight_f, int weight_i, int invweight_i) {
+  AVS_UNUSED(weight_f);
   for (int y=0;y<height;y++) {
-    for (size_t x=0;x<rowsize / sizeof(pixel_size);x++) {
-      (reinterpret_cast<pixel_size *>(p1))[x] = ((reinterpret_cast<pixel_size *>(p1))[x]*invweight + (reinterpret_cast<const pixel_size *>(p2))[x]*weight + 32768) >> 16;
+    for (size_t x=0;x<rowsize / sizeof(pixel_t);x++) {
+      (reinterpret_cast<pixel_t *>(p1))[x] = ((reinterpret_cast<pixel_t *>(p1))[x]*invweight_i + (reinterpret_cast<const pixel_t *>(p2))[x]*weight_i + 32768) >> 16;
     }
     p2+=p2_pitch;
     p1+=p1_pitch;
   }
 }
 
-void weighted_merge_planar_c_float(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height, float weight, float invweight) {
-
-  float *fp1 = reinterpret_cast<float *>(p1);
-  const float *fp2 = reinterpret_cast<const float *>(p2);
+void weighted_merge_planar_c_float(BYTE *p1, const BYTE *p2, int p1_pitch, int p2_pitch, int rowsize, int height, float weight_f, int weight_i, int invweight_i) {
+  AVS_UNUSED(weight_i);
+  AVS_UNUSED(invweight_i);
+  float invweight_f = 1.0f - weight_f;
   size_t rs = rowsize / sizeof(float);
 
   for (int y = 0; y < height; ++y) {
     for (size_t x = 0; x < rs; ++x) {
-      fp1[x] = (fp1[x] * invweight + fp2[x] * weight) / 2.0f;
+      reinterpret_cast<float *>(p1)[x] = (reinterpret_cast<float *>(p1)[x] * invweight_f + reinterpret_cast<const float *>(p2)[x] * weight_f);
     }
     p1 += p1_pitch;
     p2 += p2_pitch;
@@ -638,85 +703,108 @@ extern const AVSFunction Merge_filters[] = {
   { 0 }
 };
 
-static void merge_plane(BYTE* srcp, const BYTE* otherp, int src_pitch, int other_pitch, int src_width, int src_height, float weight, int pixelsize, IScriptEnvironment *env) {
+// also returns the proper integer weight/inverse weight for 8-16 bits
+MergeFuncPtr getMergeFunc(int bits_per_pixel, int cpuFlags, BYTE *srcp, const BYTE *otherp, float weight_f, int &weight_i, int &invweight_i)
+{
+  const int pixelsize = bits_per_pixel == 8 ? 1 : (bits_per_pixel == 32 ? 4 : 2);
+
+  // SIMD 8-16 bit: bitshift 15 integer arithmetic
+  // C    8-16 bit: bitshift 16 integer arithmetic
+  // SIMD/C Float: original float weight
+
+  // set basic 8-16bit SIMD
+  weight_i = (int)(weight_f * 32767.0f + 0.5f);
+  invweight_i = 32767 - weight_i;
+
+  if (pixelsize == 1) {
+    if ((cpuFlags & CPUF_AVX2) && IsPtrAligned(srcp, 32) && IsPtrAligned(otherp, 32))
+      return &weighted_merge_planar_avx2;
+    if ((cpuFlags & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16))
+      return &weighted_merge_planar_sse2;
+#ifdef X86_32
+    if (cpuFlags & CPUF_MMX)
+      return &weighted_merge_planar_mmx;
+#endif
+    // C: different scale!
+    weight_i = (int)(weight_f * 65535.0f + 0.5f);
+    invweight_i = 65535 - weight_i;
+    return &weighted_merge_planar_c<uint8_t>;
+  }
+  if (pixelsize == 2) {
+    if ((cpuFlags & CPUF_AVX2) && IsPtrAligned(srcp, 32) && IsPtrAligned(otherp, 32))
+    {
+      if (bits_per_pixel == 16)
+        return &weighted_merge_planar_uint16_avx2<false>;
+      return &weighted_merge_planar_uint16_avx2<true>;
+    }
+    if ((cpuFlags & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16))
+    {
+      if (bits_per_pixel == 16)
+        return &weighted_merge_planar_uint16_sse2<false>;
+      return &weighted_merge_planar_uint16_sse2<true>;
+    }
+    // C: different scale!
+    weight_i = (int)(weight_f * 65535.0f + 0.5f);
+    invweight_i = 65535 - weight_i;
+    return &weighted_merge_planar_c<uint16_t>;
+  }
+
+  // pixelsize == 4
+  if ((cpuFlags & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16))
+    return &weighted_merge_planar_sse2_float;
+  return &weighted_merge_planar_c_float;
+}
+
+static void merge_plane(BYTE* srcp, const BYTE* otherp, int src_pitch, int other_pitch, int src_rowsize, int src_height, float weight, int pixelsize, int bits_per_pixel, IScriptEnvironment *env) {
   if ((weight > 0.4961f) && (weight < 0.5039f))
   {
     //average of two planes
     if (pixelsize != 4) // 1 or 2
     {
-      if ((env->GetCPUFlags() & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16)) {
+      if ((env->GetCPUFlags() & CPUF_AVX2) && IsPtrAligned(srcp, 32) && IsPtrAligned(otherp, 32)) {
         if(pixelsize==1)
-          average_plane_sse2<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+          average_plane_avx2<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
         else // pixel_size==2
-          average_plane_sse2<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+          average_plane_avx2<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
+      }
+      else if ((env->GetCPUFlags() & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16)) {
+        if(pixelsize==1)
+          average_plane_sse2<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
+        else // pixel_size==2
+          average_plane_sse2<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
       }
       else
 #ifdef X86_32
         if (env->GetCPUFlags() & CPUF_INTEGER_SSE) {
           if (pixelsize == 1)
-            average_plane_isse<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+            average_plane_isse<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
           else // pixel_size==2
-            average_plane_isse<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+            average_plane_isse<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
         }
         else
 #endif
         {
           if (pixelsize == 1)
-            average_plane_c<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+            average_plane_c<uint8_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
           else // pixel_size==2
-            average_plane_c<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+            average_plane_c<uint16_t>(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
         }
     }
     else // if (pixelsize == 4)
-    { // todo sse for float
-      average_plane_c_float(srcp, otherp, src_pitch, other_pitch, src_width, src_height);
+    {
+      if ((env->GetCPUFlags() & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16))
+        average_plane_sse2_float(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
+      else
+        average_plane_c_float(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height);
     }
 
   } 
   else
   {
-    int iweight = (int)(weight*32767.0f);
-    int invweight = 32767 - iweight;
-    //real merge
-    if (pixelsize != 4)
-    {
-      MergeFuncPtr weighted_merge_planar;
-
-      if ((pixelsize == 2) && (env->GetCPUFlags() & CPUF_SSE4_1)) {
-        // uint16: sse 4.1
-        weighted_merge_planar = &weighted_merge_planar_uint16_sse41;
-      }
-      else if ((pixelsize == 1) && (env->GetCPUFlags() & CPUF_SSE2) && IsPtrAligned(srcp, 16) && IsPtrAligned(otherp, 16))
-      {
-        // uint8: sse2
-        weighted_merge_planar = &weighted_merge_planar_sse2;
-      }
-      else {
-#ifdef X86_32
-        if ((pixelsize == 1) && (env->GetCPUFlags() & CPUF_MMX))
-        {
-          weighted_merge_planar = &weighted_merge_planar_mmx;
-        }
-        else
-#endif
-        {
-          // C: different scale!
-          iweight = (int)(weight*65535.0f);
-          invweight = 65535 - iweight;
-          if (pixelsize == 1)
-            weighted_merge_planar = &weighted_merge_planar_c<uint8_t>;
-          else // pixelsize == 2
-            weighted_merge_planar = &weighted_merge_planar_c<uint16_t>;
-        }
-      }
-      weighted_merge_planar(srcp, otherp, src_pitch, other_pitch, src_width, src_height, iweight, invweight);
-    }
-    else // if (pixelsize == 4)
-    {
-      float fweight = weight; // intentional
-      float finvweight = 1-fweight;
-      weighted_merge_planar_c_float(srcp, otherp, src_pitch, other_pitch, src_width, src_height, fweight, finvweight);
-    }
+    int weight_i;
+    int invweight_i;
+    MergeFuncPtr weighted_merge_planar = getMergeFunc(bits_per_pixel, env->GetCPUFlags(), srcp, otherp, weight, /*out*/weight_i, /*out*/invweight_i);
+    weighted_merge_planar(srcp, otherp, src_pitch, other_pitch, src_rowsize, src_height, weight, weight_i, invweight_i);
   }
 }
 
@@ -729,8 +817,8 @@ MergeChroma::MergeChroma(PClip _child, PClip _clip, float _weight, IScriptEnviro
 {
   const VideoInfo& vi2 = clip->GetVideoInfo();
 
-  if (!vi.IsYUV() || !vi2.IsYUV())
-    env->ThrowError("MergeChroma: YUV data only (no RGB); use ConvertToYUY2 or ConvertToYV12");
+  if (!(vi.IsYUV() || vi.IsYUVA()) || !(vi2.IsYUV() || vi2.IsYUVA()))
+    env->ThrowError("MergeChroma: YUV data only (no RGB); use ConvertToYUY2, ConvertToYV12/16/24 or ConvertToYUVxxx");
 
   if (!(vi.IsSameColorspace(vi2)))
     env->ThrowError("MergeChroma: YUV images must have same data type.");
@@ -740,6 +828,9 @@ MergeChroma::MergeChroma(PClip _child, PClip _clip, float _weight, IScriptEnviro
 
   if (weight<0.0f) weight=0.0f;
   if (weight>1.0f) weight=1.0f;
+
+  pixelsize = vi.ComponentSize();
+  bits_per_pixel = vi.BitsPerComponent();
 }
 
 
@@ -778,7 +869,7 @@ PVideoFrame __stdcall MergeChroma::GetFrame(int n, IScriptEnvironment* env)
       {
         weighted_merge_chroma_yuy2_c(srcp,chromap,src_pitch,chroma_pitch,w,h,(int)(weight*32768.0f),32768-(int)(weight*32768.0f));
       }
-    } else {  // Planar
+    } else {  // Planar YUV
       env->MakeWritable(&src);
       src->GetWritePtr(PLANAR_Y); //Must be requested
 
@@ -788,12 +879,16 @@ PVideoFrame __stdcall MergeChroma::GetFrame(int n, IScriptEnvironment* env)
       BYTE* chromapV = (BYTE*)chroma->GetReadPtr(PLANAR_V);
       int src_pitch_uv = src->GetPitch(PLANAR_U);
       int chroma_pitch_uv = chroma->GetPitch(PLANAR_U);
-      int src_width_u = src->GetRowSize(PLANAR_U_ALIGNED);
-      int src_width_v = src->GetRowSize(PLANAR_V_ALIGNED);
+      int src_rowsize_u = src->GetRowSize(PLANAR_U_ALIGNED);
+      int src_rowsize_v = src->GetRowSize(PLANAR_V_ALIGNED);
       int src_height_uv = src->GetHeight(PLANAR_U);
 
-      merge_plane(srcpU, chromapU, src_pitch_uv, chroma_pitch_uv, src_width_u, src_height_uv, weight, pixelsize, env);
-      merge_plane(srcpV, chromapV, src_pitch_uv, chroma_pitch_uv, src_width_v, src_height_uv, weight, pixelsize, env);
+      merge_plane(srcpU, chromapU, src_pitch_uv, chroma_pitch_uv, src_rowsize_u, src_height_uv, weight, pixelsize, bits_per_pixel, env);
+      merge_plane(srcpV, chromapV, src_pitch_uv, chroma_pitch_uv, src_rowsize_v, src_height_uv, weight, pixelsize, bits_per_pixel, env);
+
+      if(vi.IsYUVA())
+        merge_plane(src->GetWritePtr(PLANAR_A), chroma->GetReadPtr(PLANAR_A), src->GetPitch(PLANAR_A), chroma->GetPitch(PLANAR_A),
+          src->GetRowSize(PLANAR_A_ALIGNED), src->GetHeight(PLANAR_A), weight, pixelsize, bits_per_pixel, env);
     }
   } else { // weight == 1.0
     if (vi.IsYUY2()) {
@@ -826,6 +921,8 @@ PVideoFrame __stdcall MergeChroma::GetFrame(int n, IScriptEnvironment* env)
         src->GetWritePtr(PLANAR_Y); //Must be requested
         env->BitBlt(src->GetWritePtr(PLANAR_U),src->GetPitch(PLANAR_U),chroma->GetReadPtr(PLANAR_U),chroma->GetPitch(PLANAR_U),chroma->GetRowSize(PLANAR_U),chroma->GetHeight(PLANAR_U));
         env->BitBlt(src->GetWritePtr(PLANAR_V),src->GetPitch(PLANAR_V),chroma->GetReadPtr(PLANAR_V),chroma->GetPitch(PLANAR_V),chroma->GetRowSize(PLANAR_V),chroma->GetHeight(PLANAR_V));
+        if(vi.IsYUVA())
+          env->BitBlt(src->GetWritePtr(PLANAR_A),src->GetPitch(PLANAR_A),chroma->GetReadPtr(PLANAR_A),chroma->GetPitch(PLANAR_A),chroma->GetRowSize(PLANAR_A),chroma->GetHeight(PLANAR_A));
       }
       else { // avoid the cost of 2 chroma blits
         PVideoFrame dst = env->NewVideoFrame(vi);
@@ -833,6 +930,9 @@ PVideoFrame __stdcall MergeChroma::GetFrame(int n, IScriptEnvironment* env)
         env->BitBlt(dst->GetWritePtr(PLANAR_Y),dst->GetPitch(PLANAR_Y),src->GetReadPtr(PLANAR_Y),src->GetPitch(PLANAR_Y),src->GetRowSize(PLANAR_Y),src->GetHeight(PLANAR_Y));
         env->BitBlt(dst->GetWritePtr(PLANAR_U),dst->GetPitch(PLANAR_U),chroma->GetReadPtr(PLANAR_U),chroma->GetPitch(PLANAR_U),chroma->GetRowSize(PLANAR_U),chroma->GetHeight(PLANAR_U));
         env->BitBlt(dst->GetWritePtr(PLANAR_V),dst->GetPitch(PLANAR_V),chroma->GetReadPtr(PLANAR_V),chroma->GetPitch(PLANAR_V),chroma->GetRowSize(PLANAR_V),chroma->GetHeight(PLANAR_V));
+        if(vi.IsYUVA())
+          env->BitBlt(dst->GetWritePtr(PLANAR_A),dst->GetPitch(PLANAR_A),chroma->GetReadPtr(PLANAR_A),chroma->GetPitch(PLANAR_A),chroma->GetRowSize(PLANAR_A),chroma->GetHeight(PLANAR_A));
+
         return dst;
       }
     }
@@ -841,7 +941,7 @@ PVideoFrame __stdcall MergeChroma::GetFrame(int n, IScriptEnvironment* env)
 }
 
 
-AVSValue __cdecl MergeChroma::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl MergeChroma::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
   return new MergeChroma(args[0].AsClip(), args[1].AsClip(), (float)args[2].AsFloat(1.0f), env);
 }
@@ -857,16 +957,17 @@ MergeLuma::MergeLuma(PClip _child, PClip _clip, float _weight, IScriptEnvironmen
 {
   const VideoInfo& vi2 = clip->GetVideoInfo();
 
-  if (!vi.IsYUV() || !vi2.IsYUV())
-    env->ThrowError("MergeLuma: YUV data only (no RGB); use ConvertToYUY2 or ConvertToYV12");
+  if (!(vi.IsYUV() || vi.IsYUVA()) || !(vi2.IsYUV() || vi2.IsYUVA()))
+    env->ThrowError("MergeLuma: YUV data only (no RGB); use ConvertToYUY2, ConvertToYV12/16/24 or ConvertToYUVxxx");
 
-  pixelsize = vi.BytesFromPixels(1);
+  pixelsize = vi.ComponentSize();
+  bits_per_pixel = vi.BitsPerComponent();
 
   if (!vi.IsSameColorspace(vi2)) {  // Since this is luma we allow all planar formats to be merged.
     if (!(vi.IsPlanar() && vi2.IsPlanar())) {
       env->ThrowError("MergeLuma: YUV data is not same type. YUY2 and planar images doesn't mix.");
     }
-    if (pixelsize != vi2.BytesFromPixels(1)) {
+    if (pixelsize != vi2.ComponentSize()) {
       env->ThrowError("MergeLuma: YUV data bit depth is not same.");
     }
   }
@@ -938,6 +1039,7 @@ PVideoFrame __stdcall MergeLuma::GetFrame(int n, IScriptEnvironment* env)
     return src;
   }  // Planar
   if (weight>0.9961f) {
+    // 2nd clip weight is almost 100%: no merge, just copy
     const VideoInfo& vi2 = clip->GetVideoInfo();
     if (luma->IsWritable() && vi.IsSameColorspace(vi2)) {
       if (luma->GetRowSize(PLANAR_U)) {
@@ -945,6 +1047,9 @@ PVideoFrame __stdcall MergeLuma::GetFrame(int n, IScriptEnvironment* env)
         env->BitBlt(luma->GetWritePtr(PLANAR_U),luma->GetPitch(PLANAR_U),src->GetReadPtr(PLANAR_U),src->GetPitch(PLANAR_U),src->GetRowSize(PLANAR_U),src->GetHeight(PLANAR_U));
         env->BitBlt(luma->GetWritePtr(PLANAR_V),luma->GetPitch(PLANAR_V),src->GetReadPtr(PLANAR_V),src->GetPitch(PLANAR_V),src->GetRowSize(PLANAR_V),src->GetHeight(PLANAR_V));
       }
+      if (luma->GetPitch(PLANAR_A)) // copy Alpha if exists
+        env->BitBlt(luma->GetWritePtr(PLANAR_A),luma->GetPitch(PLANAR_A),src->GetReadPtr(PLANAR_A),src->GetPitch(PLANAR_A),src->GetRowSize(PLANAR_A),src->GetHeight(PLANAR_A));
+
       return luma;
     }
     else { // avoid the cost of 2 chroma blits
@@ -955,6 +1060,9 @@ PVideoFrame __stdcall MergeLuma::GetFrame(int n, IScriptEnvironment* env)
         env->BitBlt(dst->GetWritePtr(PLANAR_U),dst->GetPitch(PLANAR_U),src->GetReadPtr(PLANAR_U),src->GetPitch(PLANAR_U),src->GetRowSize(PLANAR_U),src->GetHeight(PLANAR_U));
         env->BitBlt(dst->GetWritePtr(PLANAR_V),dst->GetPitch(PLANAR_V),src->GetReadPtr(PLANAR_V),src->GetPitch(PLANAR_V),src->GetRowSize(PLANAR_V),src->GetHeight(PLANAR_V));
       }
+      if (dst->GetPitch(PLANAR_A) && src->GetPitch(PLANAR_A)) // copy Alpha if in both clip exists
+        env->BitBlt(dst->GetWritePtr(PLANAR_A),dst->GetPitch(PLANAR_A),src->GetReadPtr(PLANAR_A),src->GetPitch(PLANAR_A),src->GetRowSize(PLANAR_A),src->GetHeight(PLANAR_A));
+
       return dst;
     }
   } else { // weight <= 0.9961f
@@ -963,17 +1071,17 @@ PVideoFrame __stdcall MergeLuma::GetFrame(int n, IScriptEnvironment* env)
     BYTE* lumapY = (BYTE*)luma->GetReadPtr(PLANAR_Y);
     int src_pitch = src->GetPitch(PLANAR_Y);
     int luma_pitch = luma->GetPitch(PLANAR_Y);
-    int src_width = src->GetRowSize(PLANAR_Y);
+    int src_rowsize = src->GetRowSize(PLANAR_Y);
     int src_height = src->GetHeight(PLANAR_Y);
 
-    merge_plane(srcpY, lumapY, src_pitch, luma_pitch, src_width, src_height, weight, pixelsize, env);
+    merge_plane(srcpY, lumapY, src_pitch, luma_pitch, src_rowsize, src_height, weight, pixelsize, bits_per_pixel, env);
   }
 
   return src;
 }
 
 
-AVSValue __cdecl MergeLuma::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl MergeLuma::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
   return new MergeLuma(args[0].AsClip(), args[1].AsClip(), (float)args[2].AsFloat(1.0f), env);
 }
@@ -995,7 +1103,8 @@ MergeAll::MergeAll(PClip _child, PClip _clip, float _weight, IScriptEnvironment*
   if (vi.width!=vi2.width || vi.height!=vi2.height)
     env->ThrowError("Merge: Images must have same width and height!");
 
-  pixelsize = vi.BytesFromPixels(1);
+  pixelsize = vi.ComponentSize();
+  bits_per_pixel = vi.BitsPerComponent();
 
   if (weight<0.0f) weight=0.0f;
   if (weight>1.0f) weight=1.0f;
@@ -1017,25 +1126,24 @@ PVideoFrame __stdcall MergeAll::GetFrame(int n, IScriptEnvironment* env)
   const int src_pitch = src->GetPitch();
   const int src_rowsize = src->GetRowSize();
 
-  merge_plane(srcp, srcp2, src_pitch, src2->GetPitch(), src_rowsize, src->GetHeight(), weight, pixelsize, env);
+  merge_plane(srcp, srcp2, src_pitch, src2->GetPitch(), src_rowsize, src->GetHeight(), weight, pixelsize, bits_per_pixel, env);
 
   if (vi.IsPlanar()) {
-    BYTE* srcpU  = (BYTE*)src->GetWritePtr(PLANAR_U);
-    BYTE* srcpV  = (BYTE*)src->GetWritePtr(PLANAR_V);
-    BYTE* srcp2U = (BYTE*)src2->GetReadPtr(PLANAR_U);
-    BYTE* srcp2V = (BYTE*)src2->GetReadPtr(PLANAR_V);
- 
-    int src_rowsize = src->GetRowSize(PLANAR_U);
-
-    merge_plane(srcpU, srcp2U, src->GetPitch(PLANAR_U), src2->GetPitch(PLANAR_U), src_rowsize, src->GetHeight(PLANAR_U), weight, pixelsize, env);
-    merge_plane(srcpV, srcp2V, src->GetPitch(PLANAR_V), src2->GetPitch(PLANAR_V), src_rowsize, src->GetHeight(PLANAR_V), weight, pixelsize, env);
+    const int planesYUV[4] = { PLANAR_Y, PLANAR_U, PLANAR_V, PLANAR_A};
+    const int planesRGB[4] = { PLANAR_G, PLANAR_B, PLANAR_R, PLANAR_A};
+    const int *planes = (vi.IsYUV() || vi.IsYUVA()) ? planesYUV : planesRGB;
+    // first plane is already processed
+    for (int p = 1; p < vi.NumComponents(); p++) {
+      const int plane = planes[p];
+      merge_plane(src->GetWritePtr(plane), src2->GetReadPtr(plane), src->GetPitch(plane), src2->GetPitch(plane), src->GetRowSize(plane), src->GetHeight(plane), weight, pixelsize, bits_per_pixel, env);
+    }
   }
 
   return src;
 }
 
 
-AVSValue __cdecl MergeAll::Create(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue __cdecl MergeAll::Create(AVSValue args, void* , IScriptEnvironment* env)
 {
   return new MergeAll(args[0].AsClip(), args[1].AsClip(), (float)args[2].AsFloat(0.5f), env);
 }

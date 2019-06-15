@@ -37,7 +37,7 @@
 #define __Tokenizer_H__
 
 #include <avisynth.h>
-
+#include <vector>
 
 /*********************************************************
 *********************************************************/
@@ -59,6 +59,9 @@ public:
   inline bool IsInt() const { return type == 'i'; }
   inline bool IsFloat() const { return type == 'f'; }
   inline bool IsString() const { return type == 's'; }
+#ifdef ARRAYS_AT_TOKENIZER_LEVEL
+  inline bool IsArray() const { return type == 'a'; }
+#endif
   inline bool IsNewline() const { return type == 'n'; }
   inline bool IsEOF() const { return type == 0; }
 
@@ -71,6 +74,9 @@ public:
   int AsInt() const { AssertType('i'); return integer; }
   float AsFloat() const { AssertType('f'); return floating_pt; }
   const char* AsString() const { AssertType('s'); return string; }
+#ifdef ARRAYS_AT_TOKENIZER_LEVEL
+  std::vector<AVSValue>* AsArray() const { AssertType('a'); return array2; }
+#endif
 
   int GetLine() const { return line; }
   int GetColumn(const char* start_of_string) const;
@@ -86,14 +92,18 @@ private:
   const char* token_start;
   const char* pc;
   int line;
-  char type;   // i'd'entifier, 'o'perator, 'i'nt, 'f'loat, 's'tring, 'n'ewline, 0=eof
+  char type;   // i'd'entifier, 'o'perator, 'i'nt, 'f'loat, 's'tring, 'n'ewline, 'a'rray, 0=eof
   union 
   {
     const char* identifier;
     const char* string;
-    int op;   // '+', '++', '.', ',', '(', ')', 0=eoln
+    int op;   // '+', '++', '.', ',', '(', ')','[', ']', 0=eoln
     int integer;
     float floating_pt;
+#ifdef ARRAYS_AT_TOKENIZER_LEVEL
+    // not used now, finally arrays are implemented with helper script functions
+    std::vector<AVSValue>* array2;
+#endif
   };
 };
 

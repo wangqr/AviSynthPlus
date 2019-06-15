@@ -312,6 +312,7 @@ bool FreezeFrame::GetParity(int n)
 
 AVSValue __cdecl FreezeFrame::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
+  AVS_UNUSED(env);
   return new FreezeFrame(args[1].AsInt(), args[2].AsInt(), args[3].AsInt(), args[0].AsClip());
 }
 
@@ -338,6 +339,7 @@ bool DeleteFrame::GetParity(int n)
 
 AVSValue __cdecl DeleteFrame::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
+  AVS_UNUSED(env);
   const int n = args[1].ArraySize();
   int m = n-1;
   int *frames = new int[n];
@@ -392,6 +394,7 @@ bool DuplicateFrame::GetParity(int n)
 
 AVSValue __cdecl DuplicateFrame::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
+  AVS_UNUSED(env);
   const int n = args[1].ArraySize();
   int *frames = new int[n];
 
@@ -627,13 +630,14 @@ Dissolve::Dissolve(PClip _child1, PClip _child2, int _overlap, double fps, IScri
     if (!(vi.IsSameColorspace(vi2)))
       env->ThrowError("Dissolve: video formats don't match");
 
-    pixelsize = vi.BytesFromPixels(1); // AVS16
+    pixelsize = vi.ComponentSize(); // AVS16
+    bits_per_pixel = vi.BitsPerComponent();
 
-	video_fade_start = vi.num_frames - overlap;
-	video_fade_end = vi.num_frames - 1;
+    video_fade_start = vi.num_frames - overlap;
+    video_fade_end = vi.num_frames - 1;
 
-	audio_fade_start = vi.AudioSamplesFromFrames(video_fade_start);
-	audio_fade_end = vi.AudioSamplesFromFrames(video_fade_end+1)-1;
+    audio_fade_start = vi.AudioSamplesFromFrames(video_fade_start);
+    audio_fade_end = vi.AudioSamplesFromFrames(video_fade_end+1)-1;
   }
   else {
 	video_fade_start = 0;
@@ -672,55 +676,34 @@ PVideoFrame Dissolve::GetFrame(int n, IScriptEnvironment* env)
   PVideoFrame a = child->GetFrame(n, env);
   PVideoFrame b = child2->GetFrame(n - video_fade_start, env);
 
-  const int multiplier = n - video_fade_end + overlap;
-  int weight = (multiplier * 32767) / (overlap+1);
-  int invweight = 32767-weight;
+  const double multiplier = n - video_fade_end + overlap;
+  float weight = (float)(multiplier / (overlap + 1.0));
 
   env->MakeWritable(&a);
-  if (pixelsize != 4)
+
+  const int planes_y[4] = { PLANAR_Y, PLANAR_U, PLANAR_V, PLANAR_A };
+  const int planes_r[4] = { PLANAR_G, PLANAR_B, PLANAR_R, PLANAR_A };
+  const int *planes;
+
+  int planeCount;
+  planeCount = vi.IsPlanar() ? vi.NumComponents() : 1;
+  planes = (!vi.IsPlanar() || vi.IsYUV() || vi.IsYUVA()) ? planes_y : planes_r;
+
+  const int bits_per_pixel = vi.BitsPerComponent();
+  for (int j = 0; j < planeCount; ++j)
   {
-    MergeFuncPtr weighted_merge_planar;
-
-    // similar to merge.cpp
-    if ((pixelsize == 2) && (env->GetCPUFlags() & CPUF_SSE4_1)) {
-      // uint16: sse 4.1
-      weighted_merge_planar = &weighted_merge_planar_uint16_sse41;
-    }
-    else if ((pixelsize == 1) && (env->GetCPUFlags() & CPUF_SSE2)) {
-      // uint8: sse2
-      weighted_merge_planar = &weighted_merge_planar_sse2;
-    }
-#ifdef X86_32
-    else if ((pixelsize == 1) && (env->GetCPUFlags() & CPUF_MMX) ) {
-      weighted_merge_planar = &weighted_merge_planar_mmx;
-    }
-#endif
-    else {
-      // C: different scale!
-      int weight = (multiplier * 65535) / (overlap + 1);
-      int invweight = 65535 - weight;
-      if (pixelsize == 1)
-        weighted_merge_planar = &weighted_merge_planar_c<uint8_t>;
-      else // pixelsize == 2
-        weighted_merge_planar = &weighted_merge_planar_c<uint16_t>;
-    }
-
-    weighted_merge_planar(a->GetWritePtr(), b->GetReadPtr(), a->GetPitch(), b->GetPitch(), a->GetRowSize(PLANAR_Y), a->GetHeight(), weight, invweight);
-    if (vi.IsPlanar()) {
-      weighted_merge_planar(a->GetWritePtr(PLANAR_U), b->GetReadPtr(PLANAR_U), a->GetPitch(PLANAR_U), b->GetPitch(PLANAR_U), a->GetRowSize(PLANAR_U), a->GetHeight(PLANAR_U), weight, invweight);
-      weighted_merge_planar(a->GetWritePtr(PLANAR_V), b->GetReadPtr(PLANAR_V), a->GetPitch(PLANAR_V), b->GetPitch(PLANAR_V), a->GetRowSize(PLANAR_V), a->GetHeight(PLANAR_V), weight, invweight);
-    }
-  }
-  else // if (pixelsize==4)
-  {
-    float fweight = (multiplier) / (overlap + 1.0f);
-    float finvweight = 1- fweight;
-    weighted_merge_planar_c_float(a->GetWritePtr(), b->GetReadPtr(), a->GetPitch(), b->GetPitch(), a->GetRowSize(PLANAR_Y), a->GetHeight(), fweight, finvweight);
-    if (vi.IsPlanar()) {
-      weighted_merge_planar_c_float(a->GetWritePtr(PLANAR_U), b->GetReadPtr(PLANAR_U), a->GetPitch(PLANAR_U), b->GetPitch(PLANAR_U), a->GetRowSize(PLANAR_U), a->GetHeight(PLANAR_U), fweight, finvweight);
-      weighted_merge_planar_c_float(a->GetWritePtr(PLANAR_V), b->GetReadPtr(PLANAR_V), a->GetPitch(PLANAR_V), b->GetPitch(PLANAR_V), a->GetRowSize(PLANAR_V), a->GetHeight(PLANAR_V), fweight, finvweight);
-    }
-
+    const int plane = planes[j];
+    const BYTE*  b_data = b->GetReadPtr(plane);
+    int          b_pitch = b->GetPitch(plane);
+    BYTE*        a_data = a->GetWritePtr(plane);
+    int          a_pitch = a->GetPitch(plane);
+    int          row_size = a->GetRowSize(plane);
+    int          height = a->GetHeight(plane);
+    
+    int weight_i;
+    int invweight_i;
+    MergeFuncPtr weighted_merge_planar = getMergeFunc(bits_per_pixel, env->GetCPUFlags(), a_data, b_data, weight, /*out*/weight_i, /*out*/invweight_i);
+    weighted_merge_planar(a_data, b_data, a_pitch, b_pitch, row_size, height, weight, weight_i, invweight_i);
   }
   return a;
 }
@@ -867,6 +850,7 @@ void AudioDub::GetAudio(void* buf, __int64 start, __int64 count, IScriptEnvironm
 
 int __stdcall AudioDub::SetCacheHints(int cachehints,int frame_range)
 {
+  AVS_UNUSED(frame_range);
   switch(cachehints)
   {
   case CACHE_DONT_CACHE_ME:
@@ -926,6 +910,7 @@ void Reverse::GetAudio(void* buf, __int64 start, __int64 count, IScriptEnvironme
 
 AVSValue __cdecl Reverse::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
+  AVS_UNUSED(env);
   return new Reverse(args[0].AsClip());
 }
 

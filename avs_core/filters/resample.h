@@ -39,8 +39,8 @@
 #include "resample_functions.h"
 
 // Resizer function pointer
-typedef void (*ResamplerV)(BYTE* dst, const BYTE* src, int dst_pitch, int src_pitch, ResamplingProgram* program, int width, int target_height, const int* pitch_table, const void* storage);
-typedef void (*ResamplerH)(BYTE* dst, const BYTE* src, int dst_pitch, int src_pitch, ResamplingProgram* program, int width, int target_height);
+typedef void (*ResamplerV)(BYTE* dst, const BYTE* src, int dst_pitch, int src_pitch, ResamplingProgram* program, int width, int target_height, int bits_per_pixel, const int* pitch_table, const void* storage);
+typedef void (*ResamplerH)(BYTE* dst, const BYTE* src, int dst_pitch, int src_pitch, ResamplingProgram* program, int width, int target_height, int bits_per_pixel);
 
 // Turn function pointer -- copied from turn.h
 typedef void (*TurnFuncPtr) (const BYTE *srcp, BYTE *dstp, int width, int height, int src_pitch, int dst_pitch);
@@ -58,10 +58,11 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
-  static ResamplerH GetResampler(int CPU, bool aligned, int pixelsize, ResamplingProgram* program, IScriptEnvironment2* env);
+  static ResamplerH GetResampler(int CPU, bool aligned, int pixelsize, int bits_per_pixel, ResamplingProgram* program, IScriptEnvironment2* env);
 
 private:
   // Resampling
@@ -80,6 +81,7 @@ private:
   int src_width, src_height, dst_width, dst_height;
   bool grey;
   int pixelsize; // AVS16
+  int bits_per_pixel;
 
   ResamplerH resampler_h_luma;
   ResamplerH resampler_h_chroma;
@@ -104,14 +106,16 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
-  static ResamplerV GetResampler(int CPU, bool aligned, int pixelsize, void*& storage, ResamplingProgram* program);
+  static ResamplerV GetResampler(int CPU, bool aligned, int pixelsize, int bits_per_pixel, void*& storage, ResamplingProgram* program);
 
 private:
   bool grey;
   int pixelsize; // AVS16
+  int bits_per_pixel;
 
   ResamplingProgram *resampling_program_luma;
   ResamplingProgram *resampling_program_chroma;
@@ -119,14 +123,10 @@ private:
   // Note: these pointer are currently not used; they are used to pass data into run-time resampler.
   // They are kept because this may be needed later (like when we implemented actual horizontal resizer.)
   void* filter_storage_luma_aligned;
-  void* filter_storage_luma_unaligned;
   void* filter_storage_chroma_aligned;
-  void* filter_storage_chroma_unaligned;
 
   ResamplerV resampler_luma_aligned;
-  ResamplerV resampler_luma_unaligned;
   ResamplerV resampler_chroma_aligned;
-  ResamplerV resampler_chroma_unaligned;
 };
 
 

@@ -119,7 +119,10 @@ void ScriptParser::ParseFunctionDefinition(void)
         }
         else if (tokenizer.IsIdentifier("string")) type = 's';
         else if (tokenizer.IsIdentifier("clip")) type = 'c';
-        else env->ThrowError("Script error: expected \"val\", \"bool\", \"int\", \"float\", \"string\", or \"clip\"");
+#ifdef NEW_AVSVALUE
+        else if (tokenizer.IsIdentifier("array")) type = 'a'; // AVS+ 161028 array type in user defined functions
+#endif
+        else env->ThrowError("Script error: expected \"val\", \"bool\", \"int\", \"float\", \"string\", \"array\", or \"clip\"");
         tokenizer.NextToken();
       }
 
@@ -273,7 +276,7 @@ PExpression ScriptParser::ParseStatement(bool* stop)
   else if (tokenizer.IsIdentifier("return")) {
     *stop = true;
     tokenizer.NextToken();
-    return new ExpReturn(ParseConditional());
+    return new ExpReturn(ParseAssignmentWithRet());
   }
   // break statement
   else if (tokenizer.IsIdentifier("break")) {
@@ -294,7 +297,7 @@ PExpression ScriptParser::ParseIf(void)
   PExpression If, Then, Else = 0;
   tokenizer.NextToken();
   Expect('(');
-  If = ParseConditional();
+  If = ParseAssignmentWithRet();
   Expect(')');
 
   Then = ParseBlock(true, &blockEmpty);
@@ -324,7 +327,7 @@ PExpression ScriptParser::ParseWhile(void)
 {  
   tokenizer.NextToken();
   Expect('(');
-  const PExpression cond = ParseConditional();
+  const PExpression cond = ParseAssignmentWithRet();
   Expect(')');
 
   ++loopDepth;
@@ -346,13 +349,13 @@ PExpression ScriptParser::ParseFor(void)
   const char* id = tokenizer.AsIdentifier();
   tokenizer.NextToken();
   Expect('=');
-  const PExpression init = ParseConditional();
+  const PExpression init = ParseAssignmentWithRet();
   Expect(',');
-  const PExpression limit = ParseConditional();
+  const PExpression limit = ParseAssignmentWithRet();
   PExpression step = NULL;
   if (tokenizer.IsOperator(',')) {
     tokenizer.NextToken();
-    step = ParseConditional();
+    step = ParseAssignmentWithRet();
   } else {
     step = PExpression(new ExpConstant(AVSValue(1)));
   }
@@ -379,29 +382,43 @@ PExpression ScriptParser::ParseAssignment(void)
     tokenizer.NextToken();
     Expect('=');
     PExpression exp = ParseConditional();
-    return new ExpGlobalAssignment(name, exp);
+	return new ExpGlobalAssignment(name, exp);
   }
-  PExpression exp = ParseConditional();
+  PExpression exp = ParseAssignmentWithRet();
   if (tokenizer.IsOperator('=')) {
     const char* name = exp->GetLvalue();
     if (!name)
       env->ThrowError("Script error: left operand of `=' must be a variable name");
     tokenizer.NextToken();
-    exp = ParseConditional();
+	exp = ParseAssignmentWithRet();
     return new ExpAssignment(name, exp);
   }
+
   return exp;
 }
 
+PExpression ScriptParser::ParseAssignmentWithRet(void)
+{
+	PExpression exp = ParseConditional();
+	if (tokenizer.IsOperator(':=')) {
+		const char* name = exp->GetLvalue();
+		if (!name)
+			env->ThrowError("Script error: left operand of `:=' must be a variable name");
+		tokenizer.NextToken();
+		exp = ParseAssignmentWithRet();
+		return new ExpAssignment(name, exp, true);
+	}
+	return exp;
+}
 
 PExpression ScriptParser::ParseConditional(void) 
 {
   PExpression a = ParseOr();
   if (tokenizer.IsOperator('?')) {
     tokenizer.NextToken();
-    PExpression b = ParseConditional();
+    PExpression b = ParseAssignmentWithRet();
     Expect(':');
-    PExpression c = ParseConditional();
+    PExpression c = ParseAssignmentWithRet();
     return new ExpConditional(a, b, c);
   }
   return a;
@@ -521,27 +538,66 @@ PExpression ScriptParser::ParseUnary(void) {
 
 PExpression ScriptParser::ParseOOP(void) 
 {
+#ifndef NEW_AVSVALUE
   PExpression left = ParseFunction(0);
   while (tokenizer.IsOperator('.')) {
     tokenizer.NextToken();
     left = ParseFunction(left);
   }
+#else
+  PExpression left = ParseFunction(0, '\0');
+  while (tokenizer.IsOperator('.') || tokenizer.IsOperator('[')) {
+    // OOP '.' or array indexing
+    char op = tokenizer.AsOperator();
+    tokenizer.NextToken();
+    left = ParseFunction(left, op);
+  }
+#endif
   return left;
 }
 
-PExpression ScriptParser::ParseFunction(PExpression context) 
+#ifndef NEW_AVSVALUE
+PExpression ScriptParser::ParseFunction(PExpression context)
+#else
+PExpression ScriptParser::ParseFunction(PExpression context, char context_char)
+#endif
 {
+#ifndef NEW_AVSVALUE
   if (!tokenizer.IsIdentifier()) {
     if (context)
       env->ThrowError("Script error: expected function name following `.'");
     else
       return ParseAtom();
   }
-
+#else
+  bool isVariableReference = (context_char == '[');
+  bool isArraySpecifier = isVariableReference || tokenizer.IsOperator('[');
+  if (isArraySpecifier) // debug
+  {
+    isArraySpecifier = isArraySpecifier;
+  }
+  if (!tokenizer.IsIdentifier() && !isVariableReference) {
+    if (context)
+      env->ThrowError("Script error: expected function name following `.'");
+    else if (!isArraySpecifier)
+      return ParseAtom();
+  }
+#endif
+#ifdef NEW_AVSVALUE
+  // treat [ as special function: "Array"
+  const char* name = (isArraySpecifier ) ? (isVariableReference ? "ArrayGet" : "Array") : tokenizer.AsIdentifier();
+  if(!isArraySpecifier) // also for variable reference: ParseOOP already had [ and also the next
+    tokenizer.NextToken();
+#else
   const char* name = tokenizer.AsIdentifier();
   tokenizer.NextToken();
+#endif
 
+#ifndef NEW_AVSVALUE
   if (!context && !tokenizer.IsOperator('(')) {
+#else
+  if (!context && !tokenizer.IsOperator('(') && !isArraySpecifier) {
+#endif
     // variable
     return new ExpVariableReference(name);
   }
@@ -549,19 +605,38 @@ PExpression ScriptParser::ParseFunction(PExpression context)
   PExpression args[max_args];
   const char* arg_names[max_args];
   memset(arg_names, 0, sizeof(arg_names));
+  int params_count = 0;
   int i=0;
   if (context)
-    args[i++] = context;
-  if (tokenizer.IsOperator('(')) {
-    tokenizer.NextToken();
+    args[i++] = context; // first arg is the object before '.'
+  if (
+#ifdef NEW_AVSVALUE
+    isArraySpecifier ||
+#endif
+    tokenizer.IsOperator('(')) {
+#ifdef NEW_AVSVALUE
+    if(!isVariableReference) // ParseOOP already had [ and also the next token
+#endif
+      tokenizer.NextToken();
     bool need_comma = false;
     for (;;) {
-      if (tokenizer.IsOperator(')')) {
+#ifdef NEW_AVSVALUE
+      if ((isArraySpecifier && tokenizer.IsOperator(']')) // arrays are delimited by ]
+          || (!isArraySpecifier &&  tokenizer.IsOperator(')')))
+#else
+      if(tokenizer.IsOperator(')'))
+#endif
+      {
         tokenizer.NextToken();
         break;
       }
       if (need_comma) {
-        Expect(',', "Script error: expected a , or )");
+#ifdef NEW_AVSVALUE
+        if(isArraySpecifier)
+          Expect(',', "Script error: expected a , or ]");
+        else
+#endif
+          Expect(',', "Script error: expected a , or )");
       }
       // check for named argument syntax (name=val)
       if (tokenizer.IsIdentifier()) {
@@ -575,10 +650,25 @@ PExpression ScriptParser::ParseFunction(PExpression context)
       if (i == max_args) {
         env->ThrowError("Script error: argument list too long");
       }
-      args[i++] = ParseConditional();
+	  args[i++] = ParseAssignmentWithRet();
+      params_count++;
       need_comma = true;
     }
+     // no this will be an one-element array of one empty array
+    /*
+    if (isArraySpecifier && params_count == 0)
+    {
+      // special case: empty array!
+      args[i++] = new ExpConstant(AVSValue()); // undefined. Array() will create null-element array
+    }
+    */
   }
+#ifdef NEW_AVSVALUE
+  if (isVariableReference && params_count == 0)
+  {
+    env->ThrowError("Script error: array indexing must have at least one index");
+  }
+#endif
   return new ExpFunctionCall(name, args, arg_names, i, !!context);
 }
 
@@ -599,9 +689,16 @@ PExpression ScriptParser::ParseAtom(void)
     tokenizer.NextToken();
     return new ExpConstant(result);
   }
+#ifdef ARRAYS_AT_TOKENIZER_LEVEL
+  else if (tokenizer.IsArray()) {
+    std::vector<AVSValue>* result = tokenizer.AsArray(); // PF tokenizer returns new array
+    tokenizer.NextToken();
+    return new ExpConstant(result);
+  }
+#endif
   else if (tokenizer.IsOperator('(')) {
     tokenizer.NextToken();
-    PExpression result = ParseConditional();
+	PExpression result = ParseAssignmentWithRet();
     Expect(')');
     return result;
   }

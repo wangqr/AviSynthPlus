@@ -1,13 +1,36 @@
-﻿#define AvsName "AviSynth+"
+﻿;!!!Conditional!!!  comment out the following define to ignore VS redistributables
+;#define WITH_VC_REDIST
+;Note: Microsoft Visual C++ Redistributable 2019 (2015-2019) still installs on older OS's 
+;such as WinXP SP3 to support apps built with v141(_xp) toolset
+
+;headers and c lib are OK, but documentation is not up to date, anyway we include them
+#define WITH_SDK
+
+;this section is not up to date, don't include them
+;#define WITH_DOCS
+
+;!!!Conditional!!!  comment out the following define to include project web url
+;original Avs+ project page is not maintained at the moment (Dec. 2017) and contains very old content
+;#define WITH_AVSPLUS_URL
+
+#define AvsName "AviSynth+"
+#define AvsFriendlyName "AviSynthPlus"
 #define AvsPublisher "The Public"
 #define AppId "{AC78780F-BACA-4805-8D4F-AE1B52B7E7D3}"
-#define AvsGitURL "https://github.com/pylorak/avisynth"
+#define AvsGitURL "https://github.com/pinterf/AviSynthPlus/"
+;#define AvsGitURL "https://github.com/pylorak/avisynth"
+
+#ifdef WITH_AVSPLUS_URL
 #define AvsWebURL "http://www.avs-plus.net"
+#endif
 
-#define BuildDir32 "..\..\..\build-vs2013-x86"
-#define BuildDir64 "..\..\..\build-vs2013-x64"
+;There is no specific x86/x64 output directory.
+;Build x86 avs+ then copy the Output folder (with the folder itself) here
+#define BuildDir32 "x86"
+;Build x64 avs+ then copy the Output folder (with the folder itself) here
+#define BuildDir64 "x64"
 
-#define VcVersion "Microsoft Visual C++ Redistributable 2013"
+#define VcVersion "Microsoft Visual C++ Redistributable for Visual Studio 2019"
 #define BuildDate GetFileDateTimeString(AddBackslash(BuildDir32) + "Output\AviSynth.dll", 'yyyy/mm/dd', '-',);
 
 #expr Exec("powershell", "-ExecutionPolicy unrestricted -File update_git_rev.ps1", SourcePath, 1)
@@ -22,6 +45,10 @@
 AppId={{#AppId}
 AppName={#AvsName}
 AppVersion={#Version}.{#RevisionNumber}
+;use a simpler file name convention. e.g. AviSynthPlus-MT-r2570.exe
+AppVerName={#AvsName} {#Version} r{#RevisionNumber}
+OutputBaseFilename={#AvsFriendlyName}-{#Branch}-r{#RevisionNumber}
+#if false
 #if IsRelease == "True"
   AppVerName={#AvsName} {#Version}
   OutputBaseFilename={#AvsName}-v{#Version}
@@ -29,14 +56,18 @@ AppVersion={#Version}.{#RevisionNumber}
   AppVerName={#AvsName} {#Version} r{#RevisionNumber}
   OutputBaseFilename={#AvsName}-{#Branch}-v{#Version}-r{#RevisionNumber}-{#Revision}
 #endif
+#endif
 AppPublisher={#AvsPublisher}
+#ifdef WITH_AVSPLUS_URL
 AppPublisherURL={#AvsWebURL}
 AppSupportURL={#AvsWebURL}/get_started.html
+#endif
 AppUpdatesURL={#AvsGitURL}/releases
 AppReadmeFile={#AvsGitURL}/blob/master/README.rst
 VersionInfoVersion={#Version}.{#RevisionNumber}
 DefaultDirName={pf}\{#AvsName}
 DefaultGroupName={#AvsName}
+DisableWelcomePage=no
 DisableProgramGroupPage=yes
 OutputDir={#BuildDir32}\..
 SetupIconFile=..\Icons\Ico\InstIcon.ico
@@ -45,7 +76,7 @@ WizardImageFile=WizardImageBig.bmp
 WizardSmallImageFile=WizardImageSmall.bmp
 ChangesAssociations=yes
 ChangesEnvironment=yes
-
+;Compression=lzma2/max
 Compression=lzma2/ultra
 SolidCompression=yes
 SetupLogging=yes
@@ -74,6 +105,7 @@ Name: "main"; Description: "{cm:CmpMain,{#AvsName}}"; Types: full compact custom
 Name: "main\avs32"; Description: "{#AvsName} (x86)"; Types: full compact custom
 Name: "main\avs64"; Description: "{#AvsName} (x64)"; Types: full compact custom; Check: IsWin64
 
+#ifdef WITH_DOCS
 Name: "docs"; Description: "{cm:CmpDocs}";
 Name: "docs\enall"; Description: "{cm:CmpDocsEn}"; Types: full; Languages: not en
 Name: "docs\en"; Description: "{cm:CmpDocsEn}"; Types: full compact custom; Languages: en
@@ -85,9 +117,18 @@ Name: "docs\en"; Description: "{cm:CmpDocsEn}"; Types: full compact custom; Lang
 ;Name: "docs\pl"; Description: "{cm:CmpDocsPl}"; Types: full compact custom; Languages: pl
 ;Name: "docs\pt"; Description: "{cm:CmpDocsPt}"; Types: full compact custom; Languages: pt pt_br
 ;Name: "docs\ru"; Description: "{cm:CmpDocsRu}"; Types: full compact custom; Languages: ru
+#endif
+
+Name: "associations"; Description: "{cm:SelectAssoc}"; Types: full custom
+Name: "associations\openwithnotepad"; Description: "{cm:SelectAssocNotepadOpen}"; Types: full custom
+Name: "associations\shellnew"; Description: "{cm:SelectAssocAddShellNew}"; Types: full custom
+Name: "associations\mplayer"; Description: "{cm:SelectAssocMplayer}"; Types: full custom; Check: ExistsMPlayer2
+Name: "associations\wmplayer"; Description: "{cm:SelectAssocWMplayer}"; Types: full custom; Check: ExistsWMPlayer
 
 Name: "examples"; Description: "{cm:CmpDocsExamples}"; Types: full compact custom
+#ifdef WITH_SDK
 Name: "sdk"; Description: "{cm:CmpSdk,{#AvsName}}"; Types: full custom
+#endif
 
 Name: "avsmig"; Description: "{cm:CmpMig}"; Types: full compact custom; Flags: fixed; Check: IsLegacyAvsInstalled('32')
 Name: "avsmig\uninst"; Description: "{cm:CmpMigUninstall,{#AvsName}}"; Flags: fixed exclusive
@@ -114,18 +155,28 @@ Source: "{commonprograms}\AviSynth 2.5\*"; DestDir:{code:GetAvsDirsLegacy|Prog}\
 Source: "..\gpl*.txt"; DestDir: "{app}\License"; Components: main; Flags: ignoreversion
 Source: "..\lgpl_for_used_libs.txt"; DestDir: "{app}\License"; Components: main; Flags: ignoreversion
 
+Source: "..\Readme\readme.txt"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "..\Readme\readme_history.txt"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+
 Source: "{#BuildDir32}\Output\AviSynth.dll"; DestDir:{sys}; Components: main\avs32; Flags: 32bit ignoreversion 
 Source: "{#BuildDir32}\Output\System\DevIL.dll"; DestDir:{sys}; Components: main\avs32; Flags: 32bit ignoreversion 
 Source: "{#BuildDir32}\Output\Plugins\*.dll"; DestDir:{code:GetAvsDirsPlus|PlugPlus32}; Components: main\avs32; Flags: ignoreversion 
 Source: "..\ColorPresets\*"; DestDir:{code:GetAvsDirsPlus|PlugPlus32}; Components: main\avs32; Flags: ignoreversion 
-Source: "..\Prerequisites\vcredist_x86.exe"; DestDir: {app}; Components: main\avs32; Flags: deleteafterinstall
+#ifdef WITH_VC_REDIST
+;get latest from https://www.visualstudio.com/downloads/
+Source: "..\Prerequisites\VC_redist.x86.exe"; DestDir: {app}; Components: main\avs32; Flags: deleteafterinstall; Check: IncludeVcRedist()
+#endif
 
 Source: "{#BuildDir64}\Output\AviSynth.dll"; DestDir:{sys}; Components: main\avs64; Flags: 64bit ignoreversion 
 Source: "{#BuildDir64}\Output\System\DevIL.dll"; DestDir:{sys}; Components: main\avs64; Flags: 64bit ignoreversion 
 Source: "{#BuildDir64}\Output\Plugins\*.dll"; DestDir:{code:GetAvsDirsPlus|PlugPlus64}; Components: main\avs64; Flags: ignoreversion 
 Source: "..\ColorPresets\*"; DestDir:{code:GetAvsDirsPlus|PlugPlus64}; Components: main\avs64; Flags: ignoreversion
-Source: "..\Prerequisites\vcredist_x64.exe"; DestDir: {app}; Components: main\avs64; Flags: deleteafterinstall
+#ifdef WITH_VC_REDIST
+;get latest from https://www.visualstudio.com/downloads/
+Source: "..\Prerequisites\VC_redist.x64.exe"; DestDir: {app}; Components: main\avs64; Flags: deleteafterinstall; Check: IncludeVcRedist()
+#endif
 
+#ifdef WITH_DOCS
 Source: "..\docs\*.css"; DestDir: "{app}\docs"; Components: docs; Flags: ignoreversion
 ;Source: "..\docs\czech\*"; DestDir: "{app}\docs\Czech"; Components: docs\cs; Flags: ignoreversion recursesubdirs 
 Source: "..\docs\english\*"; DestDir: "{app}\docs\English"; Components: docs\en docs\enall; Flags: ignoreversion recursesubdirs 
@@ -136,9 +187,14 @@ Source: "..\docs\english\*"; DestDir: "{app}\docs\English"; Components: docs\en 
 ;Source: "..\docs\polish\*"; DestDir: "{app}\docs\Polish"; Components: docs\pl; Flags: ignoreversion recursesubdirs 
 ;Source: "..\docs\portugese\*"; DestDir: "{app}\docs\Portuguese"; Components: docs\pt; Flags: ignoreversion recursesubdirs 
 ;Source: "..\docs\russian\*"; DestDir: "{app}\docs\Russian"; Components: docs\ru; Flags: ignoreversion recursesubdirs 
+#endif
 
+#ifdef WITH_SDK
 Source: "..\FilterSDK\*"; DestDir: "{app}\FilterSDK"; Components: sdk; Flags: ignoreversion recursesubdirs
 Source: "..\..\avs_core\include\*"; DestDir: "{app}\FilterSDK\include"; Components: sdk; Flags: ignoreversion recursesubdirs
+Source: "{#BuildDir32}\Output\c_api\*"; DestDir: "{app}\FilterSDK\lib\x86"; Components: sdk; Flags: ignoreversion recursesubdirs
+Source: "{#BuildDir64}\Output\c_api\*"; DestDir: "{app}\FilterSDK\lib\x64"; Components: sdk; Flags: ignoreversion recursesubdirs
+#endif
 
 Source: "..\Examples\*"; DestDir: "{app}\Examples"; Components: examples; Flags: recursesubdirs 
 
@@ -160,6 +216,16 @@ Root: HKLM64; Subkey: "Software\Classes\Media Type\Extensions\.avs"; ValueName: 
 
 Root: HKLM; Subkey: "Software\Classes\.avs"; ValueName: ""; ValueType: string; ValueData: "avsfile"; Flags: uninsdeletekey; Components: main
 Root: HKLM; Subkey: "Software\Classes\.avsi"; ValueName: ""; ValueType: string; ValueData: "avs_auto_file"; Flags: uninsdeletekey; Components: main
+
+Root: HKLM; Subkey: "Software\Classes\.avs\OpenWithList\notepad.exe"; Flags: uninsdeletekey; Components: associations\openwithnotepad
+Root: HKLM; Subkey: "Software\Classes\avsfile\OpenWithList\notepad.exe"; Flags: uninsdeletekey; Components: associations\openwithnotepad
+Root: HKLM; Subkey: "Software\Classes\.avsi\OpenWithList\notepad.exe"; Flags: uninsdeletekey; Components: associations\openwithnotepad
+Root: HKLM; Subkey: "Software\Classes\avs_auto_file\OpenWithList\notepad.exe"; Flags: uninsdeletekey; Components: associations\openwithnotepad
+Root: HKLM; Subkey: "Software\Classes\.avs\ShellNew"; ValueName: "NullFile"; ValueType: string; ValueData: ""; Flags: uninsdeletekey; Components: associations\shellnew
+Root: HKLM; Subkey: "Software\Classes\avsfile\ShellNew"; ValueName: "NullFile"; ValueType: string; ValueData: ""; Flags: uninsdeletekey; Components: associations\shellnew
+Root: HKLM; Subkey: "Software\Classes\avsfile\shell\play\command"; ValueName: ""; ValueType: string; ValueData: """{pf}\Windows Media Player\mplayer2.exe"" /Play ""%L"""; Flags: uninsdeletekey; Components: associations\mplayer; Check: ExistsMPlayer2
+Root: HKLM; Subkey: "Software\Classes\avsfile\shell\play\command"; ValueName: ""; ValueType: string; ValueData: """{pf}\Windows Media Player\wmplayer.exe"" ""%1"""; Flags: uninsdeletekey; Components: associations\wmplayer; Check: ExistsWMPlayer
+
 Root: HKLM; Subkey: "Software\Classes\avsfile"; ValueName: ""; ValueType: string; ValueData: "{cm:FileTypeDescAvs,{#AvsName}}"; Components: main; Flags: uninsdeletekey
 Root: HKLM; Subkey: "Software\Classes\avsfile\DefaultIcon"; ValueName: ""; ValueType: string; ValueData: "{sys}\AviSynth.dll,0"; Components: main\avs32
 Root: HKLM; Subkey: "Software\Classes\avsfile\DefaultIcon"; ValueName: ""; ValueType: string; ValueData: "{win}\system32\AviSynth.dll,0"; Components: main\avs64 and not main\avs32 
@@ -178,8 +244,10 @@ Root: HKLM64; Subkey: "Software\AviSynth"; ValueName:""; ValueType: string; Valu
 Root: HKLM64; Subkey: "Software\AviSynth"; ValueName:"plugindir2_5"; ValueType: string; ValueData: "{code:GetAvsDirsPlus|Plug64}"; Components: main\avs64; Check:IsWin64; Flags: uninsdeletevalue
 Root: HKLM64; Subkey: "Software\AviSynth"; ValueName:"plugindir+"; ValueType: string; ValueData: "{code:GetAvsDirsPlus|PlugPlus64}"; Components: main\avs64; Check:IsWin64; Flags: uninsdeletevalue
 
+#ifdef WITH_SDK
 ;Set SDK Environment Variable
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueName: "AVISYNTH_SDK_PATH"; ValueType: string; ValueData: "{app}\FilterSDK"; Components: sdk; Flags: uninsdeletevalue
+#endif
 ;Delete Legacy AVS Install Entry
 Root: HKLM32; Subkey: "Software\Microsoft\Windows\CurrentVersion\Uninstall\AviSynth"; Flags: deletekey; Components: avsmig\backup
 ;Add entry for legacy AviSynth Program Folder
@@ -189,8 +257,8 @@ Root: HKLM32; Subkey: "Software\AviSynth"; ValueName: "LegacyDir"; ValueType: st
 Type: files; Name: "{app}\Setup Log*.txt"
 
 [Run]
-Filename: "{app}\vcredist_x86.exe"; Parameters: "/q /norestart"; Components: main\avs32 ;Description: "{#VcVersion} (x86)"; StatusMsg: "{cm:InstallStatusRuntime,{#VcVersion},x86}"
-Filename: "{app}\vcredist_x64.exe"; Parameters: "/q /norestart"; Components: main\avs64 ;Description: "{#VcVersion} (x64)"; StatusMsg: "{cm:InstallStatusRuntime,{#VcVersion},x64}"
+Filename: "{app}\VC_redist.x86.exe"; Parameters: "/q /norestart"; Components: main\avs32 ;Description: "{#VcVersion} (x86)"; StatusMsg: "{cm:InstallStatusRuntime,{#VcVersion},x86}"; Check: IncludeVcRedist()
+Filename: "{app}\VC_redist.x64.exe"; Parameters: "/q /norestart"; Components: main\avs64 ;Description: "{#VcVersion} (x64)"; StatusMsg: "{cm:InstallStatusRuntime,{#VcVersion},x64}"; Check: IncludeVcRedist()
 
 [Ini]
 ;Backup legacy AviSynth registry entries to .reg file
@@ -251,6 +319,27 @@ const
   AVSUNINST_OK = 2;
   LogIndent = '--- ';
 
+procedure LogVal(Prefix, Val: String);
+begin
+  Log(Prefix + ': ' + Val);
+end;
+
+procedure LogValInd(Prefix, Val: String);
+begin
+  Log(LogIndent + Prefix + ': ' + Val);
+end;
+
+procedure LogAvsDirectories(AvsDir: TAvsDirs);
+begin
+  with AvsDir do begin 
+    LogValInd('Program',Prog);
+    LogValInd('Plugins',Plug32);
+    LogValInd('Plugins+',PlugPlus32);
+    LogValInd('Plugins64',Plug64);
+    LogValInd('Plugins64+',PlugPlus64);
+  end;
+end;
+
 // Directory handling                                                              
 procedure SetAvsDirsDefault;
 begin
@@ -259,6 +348,7 @@ begin
     AvsDirsDefault.PlugPlus32 := '\plugins+';
     AvsDirsDefault.Plug64 := '\plugins64';
     AvsDirsDefault.PlugPlus64 := '\plugins64+';
+    AvsDirsDefault.IsSet := True;
   end;
 end;
 
@@ -424,27 +514,6 @@ begin
   end;
 end;
 
-procedure LogVal(Prefix, Val: String);
-begin
-  Log(Prefix + ': ' + Val);
-end;
-
-procedure LogValInd(Prefix, Val: String);
-begin
-  Log(LogIndent + Prefix + ': ' + Val);
-end;
-
-procedure LogAvsDirectories(AvsDir: TAvsDirs);
-begin
-  with AvsDir do begin 
-    LogValInd('Program',Prog);
-    LogValInd('Plugins',Plug32);
-    LogValInd('Plugins+',PlugPlus32);
-    LogValInd('Plugins64',Plug64);
-    LogValInd('Plugins64+',PlugPlus64);
-  end;
-end;
-
 procedure SetInputs(ID: Integer; State: Boolean);
 begin
   PluginPage.Edits[ID].Enabled := State
@@ -471,6 +540,7 @@ end;
 function InitializeSetup(): Boolean;
 begin
   SetAvsDirsReg();
+  SetAvsDirsDefault();
   Result := True
 end;
 
@@ -521,7 +591,8 @@ begin
     Result := True
 
   end else if CurPageID = wpSelectComponents then begin
-  UpdatePluginDirPage('read');
+    SetAvsDirsPlus();
+    UpdatePluginDirPage('read');
     if IsComponentSelected('main\avs64') then begin                                                       
       if IsComponentSelected('avsmig\backup') and IsLegacyAvsInstalled('64') then
         SetInputs(2,false)
@@ -713,3 +784,21 @@ begin
   DelTree(ExpandConstant('{commonprograms}\AviSynth 2.5'), True, True, False);
 end;
 
+function IncludeVcRedist(): boolean;
+begin
+  #ifdef WITH_VC_REDIST
+  Result := True;
+  #else
+  Result := False;
+  #endif
+end;
+
+function ExistsMPlayer2(): boolean;
+begin
+  Result := FileExists(ExpandConstant('{pf}\Windows Media Player\mplayer2.exe'));
+end;
+
+function ExistsWMPlayer(): boolean;
+begin
+  Result := FileExists(ExpandConstant('{pf}\Windows Media Player\wmplayer.exe'));
+end;

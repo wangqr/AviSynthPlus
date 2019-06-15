@@ -38,6 +38,14 @@
 #include <avisynth.h>
 
 
+struct GreyConversionMatrix {
+  int r;    // for 15bit scaled integer arithmetic
+  int g;
+  int b;
+  float r_f;    // for float operation
+  float g_f;
+  float b_f;
+};
 
 class Greyscale : public GenericVideoFilter 
 /**
@@ -51,12 +59,17 @@ public:
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
 private:
+  void BuildGreyMatrix();
+  GreyConversionMatrix greyMatrix;
   int matrix_;
-  enum {Rec601 = 0, Rec709, Average };
+  enum {Rec601 = 0, Rec709, Average, Rec2020 };
+  int pixelsize;
+  int bits_per_pixel;
 
 };
 

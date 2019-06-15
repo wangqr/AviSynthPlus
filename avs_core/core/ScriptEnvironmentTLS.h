@@ -14,6 +14,8 @@ private:
   InternalEnvironment *core;
   const size_t thread_id;
   VarTable* global_var_table;
+  // PF 161223 why do we need thread-local global variables?
+  // comment remains here until it gets cleared, anyway, I make it of no use
   VarTable* var_table;
   BufferPool BufferPool;
 
@@ -64,7 +66,10 @@ public:
 
   bool __stdcall SetGlobalVar(const char* name, const AVSValue& val)
   {
-    return global_var_table->Set(name, val);
+//    return global_var_table->Set(name, val);
+    return core->SetGlobalVar(name, val);
+    // PF 161223 use real global table, runtime scripts can write globals from different threads
+    // so we don't use the TLS global_var_table
   }
 
   void __stdcall PushContext(int level=0)
@@ -182,7 +187,8 @@ public:
   {
     va_list val;
     va_start(val, fmt);
-    char* result = core->Sprintf(fmt, val);
+    // do not call core->Sprintf, because cannot pass ... further
+    char* result = core->VSprintf(fmt, val); 
     va_end(val);
     return result;
   }
@@ -196,8 +202,18 @@ public:
   {
     va_list val;
     va_start(val, fmt);
-    core->ThrowError(fmt, val);
+    core->VThrowError(fmt, val);
     va_end(val);
+  }
+
+  virtual void __stdcall VThrowError(const char* fmt, va_list va)
+  {
+    core->VThrowError(fmt, va);
+  }
+
+  virtual PVideoFrame __stdcall SubframePlanarA(PVideoFrame src, int rel_offset, int new_pitch, int new_row_size, int new_height, int rel_offsetU, int rel_offsetV, int new_pitchUV, int rel_offsetA)
+  {
+    return core->SubframePlanarA(src, rel_offset, new_pitch, new_row_size, new_height, rel_offsetU, rel_offsetV, new_pitchUV, rel_offsetA);
   }
 
   void __stdcall AddFunction(const char* name, const char* params, ApplyFunc apply, void* user_data=0)

@@ -141,6 +141,8 @@ const GUID MEDIASUBTYPE_I420 = {FourCC('I420'), 0x0000, 0x0010, {0x80, 0x00, 0x0
 // Already defined by platform headers: const GUID MEDIASUBTYPE_NV12 = {FourCC('NV12'), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 const GUID MEDIASUBTYPE_YV16 = {FourCC('YV16'), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 const GUID MEDIASUBTYPE_YV24 = {FourCC('YV24'), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+const GUID MEDIASUBTYPE_BRA64 = { FourCC('BRA\100'), 0x0000, 0x0010,{ 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }; // BRA@ ie. BRA[64]
+const GUID MEDIASUBTYPE_BGR48 = { FourCC('BGR\060'), 0x0000, 0x0010,{ 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }; // BGR0 ie. BGR[48]
 
 
 // Format a GUID for printing
@@ -209,6 +211,8 @@ char* PrintPixelType(int pixel_type) {
   switch (pixel_type) {
     case VideoInfo::CS_BGR24:    return "RGB24";
     case VideoInfo::CS_BGR32:    return "RGB32";
+    case VideoInfo::CS_BGR48:    return "RGB48";
+    case VideoInfo::CS_BGR64:    return "RGB64";
     case VideoInfo::CS_YUY2:     return "YUY2";
 //  case VideoInfo::CS_RAW32:    return "Raw32";
     case VideoInfo::CS_YV24:     return "YV24";
@@ -262,6 +266,7 @@ GetSample::GetSample(bool _load_audio, bool _load_video, unsigned _media, LOG* _
     av_buffer = 0;
     seeking = flushing = end_of_stream = false;
     memset(&vi, 0, sizeof(vi));
+    m_bInvertFrames = false;
     sample_end_time = sample_start_time = segment_start_time = segment_stop_time = 0;
     evtDoneWithSample = ::CreateEvent(NULL, FALSE, FALSE, NULL);
     evtNewSampleReady = ::CreateEvent(NULL, FALSE, FALSE, NULL);
@@ -289,6 +294,8 @@ GetSample::GetSample(bool _load_audio, bool _load_video, unsigned _media, LOG* _
       if (media & mediaARGB)   InitMediaType(my_media_types[i++], MEDIATYPE_Video, MEDIASUBTYPE_ARGB32);
       if (media & mediaRGB32)  InitMediaType(my_media_types[i++], MEDIATYPE_Video, MEDIASUBTYPE_RGB32);
       if (media & mediaRGB24)  InitMediaType(my_media_types[i++], MEDIATYPE_Video, MEDIASUBTYPE_RGB24);
+      if (media & mediaRGB64)  InitMediaType(my_media_types[i++], MEDIATYPE_Video, MEDIASUBTYPE_BRA64);
+      if (media & mediaRGB48)  InitMediaType(my_media_types[i++], MEDIATYPE_Video, MEDIASUBTYPE_BGR48);
       no_my_media_types = i;
       if (media == mediaNONE) media = mediaAUTO;
     }
@@ -381,6 +388,11 @@ GetSample::GetSample(bool _load_audio, bool _load_video, unsigned _media, LOG* _
           // Truncate the height to avoid buffer overrun.
           dssRPT2(dssERROR, "GetCurrentFrame() Input buffer to small, %d expecting %d!\n", av_sample_bytes, height*stride);
           height = av_sample_bytes/stride;
+        }
+
+        if (m_bInvertFrames) {
+          buf += stride * (height - 1);
+          stride = -stride;
         }
 
         env->BitBlt(pvf->GetWritePtr(), pvf->GetPitch(), buf, stride, rowsize, height);
@@ -960,14 +972,16 @@ SeekExit:
     }
 
     VideoInfo tmp = vi;
+    bool bInvertFrames = false;
 
-    if (GetSample::InternalQueryAccept(pmt, tmp) != S_OK) {
+    if (GetSample::InternalQueryAccept(pmt, tmp, bInvertFrames) != S_OK) {
       dssRPT0(dssERROR, "GetSample::ReceiveConnection() ** VFW_E_TYPE_NOT_ACCEPTED **\n");
       return VFW_E_TYPE_NOT_ACCEPTED;
     }
 
     dssRPT1(dssCMD, "GetSample::ReceiveConnection(0x%08p, pmt)\n", pConnector);
     vi = tmp;
+    m_bInvertFrames = bInvertFrames;
     source_pin = pConnector;
     if (am_media_type)
       DeleteMediaType(am_media_type);
@@ -1073,15 +1087,19 @@ SeekExit:
 
   HRESULT __stdcall GetSample::QueryAccept(const AM_MEDIA_TYPE* pmt) {
     VideoInfo tmp = vi;
+    bool bInvertFrames = false;
 
-    HRESULT result = InternalQueryAccept(pmt, tmp);
+    HRESULT result = InternalQueryAccept(pmt, tmp, bInvertFrames);
 
-    if (result == S_OK) vi = tmp;
+    if (result == S_OK) {
+      vi = tmp;
+      m_bInvertFrames = bInvertFrames;
+    }
 
     return result;
   }
 
-  HRESULT GetSample::InternalQueryAccept(const AM_MEDIA_TYPE* pmt, VideoInfo &vi) {
+  HRESULT GetSample::InternalQueryAccept(const AM_MEDIA_TYPE* pmt, VideoInfo &vi, bool &bInvertFrames) {
     if (!pmt) {
       dssRPT0(dssERROR, "GetSample::QueryAccept() ** E_POINTER **\n");
       return E_POINTER;
@@ -1239,6 +1257,8 @@ pbFormat:
 
     if (pmt->majortype == MEDIATYPE_Video) {
       int pixel_type = 0;
+      bool invert_if_height_is_negative = false; // For RGB24,RGB32,ARGB32.
+      bInvertFrames = false;
       if        (pmt->subtype == MEDIASUBTYPE_YV12) {
         if (!(media & mediaYV12)) {
           dssRPT0(dssNEG,  "*** Video: Subtype denied - YV12\n");
@@ -1308,6 +1328,7 @@ pbFormat:
           return S_FALSE;
         }
         pixel_type = VideoInfo::CS_BGR24;
+        invert_if_height_is_negative = true;
 
       } else if (pmt->subtype == MEDIASUBTYPE_RGB32) {
         if (!(media & mediaRGB32)) {
@@ -1315,6 +1336,7 @@ pbFormat:
           return S_FALSE;
         }
         pixel_type = VideoInfo::CS_BGR32;
+        invert_if_height_is_negative = true;
 
       } else if (pmt->subtype == MEDIASUBTYPE_ARGB32) {
         if (!(media & mediaARGB)) {
@@ -1322,6 +1344,26 @@ pbFormat:
           return S_FALSE;
         }
         pixel_type = VideoInfo::CS_BGR32;
+        invert_if_height_is_negative = true;
+
+      } else if (pmt->subtype == MEDIASUBTYPE_BGR48) {
+        if (!(media & mediaRGB48)) {
+          dssRPT0(dssNEG,  "*** Video: Subtype denied - BGR[48]\n");
+          return S_FALSE;
+        }
+        pixel_type = VideoInfo::CS_BGR48;
+        bInvertFrames = true; // BGR[48] is top-down, CS_BGR48 is bottom-up
+
+      } else if (pmt->subtype == MEDIASUBTYPE_BRA64) {
+        if (!(media & mediaRGB64)) {
+          dssRPT0(dssNEG,  "*** Video: Subtype denied - BRA[64]\n");
+          return S_FALSE;
+        }
+        pixel_type = VideoInfo::CS_BGR64;
+        bInvertFrames = true; // BRA[64] is top-down, CS_BGR64 is bottom-up
+
+//      } else if (pmt->subtype == MEDIASUBTYPE_Y8) {
+//        TODO: Y8
 
       } else {
         dssRPT2(dssNEG,  "*** Video: Subtype rejected - '%s' %s\n", PrintFourCC(pmt->subtype.Data1), PrintGUID(&pmt->subtype));
@@ -1367,6 +1409,10 @@ pbFormat:
       vi.pixel_type = pixel_type;
       vi.width = pbi->biWidth;
       vi.height = (pbi->biHeight < 0) ? -pbi->biHeight : pbi->biHeight;
+
+      if (pbi->biHeight < 0 && invert_if_height_is_negative) {
+        bInvertFrames = true;
+      }
 
       if (_avg_time_per_frame) {
         vi.SetFPS(10000000, _avg_time_per_frame);
@@ -2584,6 +2630,8 @@ AVSValue __cdecl Create_DirectShowSource(AVSValue args, void*, IScriptEnvironmen
     else if (!lstrcmpi(pixel_type, "AYUV"))  { _media = GetSample::mediaAYUV; }
     else if (!lstrcmpi(pixel_type, "RGB24")) { _media = GetSample::mediaRGB24; }
     else if (!lstrcmpi(pixel_type, "RGB32")) { _media = GetSample::mediaRGB32 | GetSample::mediaARGB; }
+    else if (!lstrcmpi(pixel_type, "RGB48")) { _media = GetSample::mediaRGB48; }
+    else if (!lstrcmpi(pixel_type, "RGB64")) { _media = GetSample::mediaRGB64; }
     else if (!lstrcmpi(pixel_type, "ARGB"))  { _media = GetSample::mediaARGB; }
     else if (!lstrcmpi(pixel_type, "RGB"))   { _media = GetSample::mediaRGB; }
     else if (!lstrcmpi(pixel_type, "YUV"))   { _media = GetSample::mediaYUV; }
@@ -2594,7 +2642,7 @@ AVSValue __cdecl Create_DirectShowSource(AVSValue args, void*, IScriptEnvironmen
     else if (!lstrcmpi(pixel_type, "YUVEX")) { _media = GetSample::mediaYUVex; }
     else if (!lstrcmpi(pixel_type, "FULL"))  { _media = GetSample::mediaFULL; }
     else {
-      env->ThrowError("DirectShowSource: pixel_type must be \"RGB24\", \"RGB32\", \"ARGB\", "
+      env->ThrowError("DirectShowSource: pixel_type must be \"RGB24\", \"RGB32\", \"ARGB\", \"RGB48\", \"RGB64\", "
                       "\"YUY2\", \"YV12\", \"I420\", \"YV16\", \"YV24\", \"AYUV\", \"Y41P\", "
                       "\"Y411\", \"NV12\", \"RGB\", \"YUV\" , \"YUVex\", \"AUTO\"  or \"FULL\"");
     }

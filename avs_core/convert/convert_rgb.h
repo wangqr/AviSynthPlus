@@ -38,34 +38,70 @@
 #include <avisynth.h>
 
 
-class RGB24to32 : public GenericVideoFilter
+class RGBtoRGBA : public GenericVideoFilter
 /**
-  * RGB -> RGBA, setting alpha channel to 255
+  * RGB -> RGBA, setting alpha channel to 255/65535
   */
 {
 public:
-  RGB24to32(PClip src);
+  RGBtoRGBA(PClip src);
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 };
 
 
-class RGB32to24 : public GenericVideoFilter
+class RGBAtoRGB : public GenericVideoFilter
 /**
   * Class to strip alpha channel
   */
 {
 public:
-  RGB32to24(PClip src);
+  RGBAtoRGB(PClip src);
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 };
 
+class PackedRGBtoPlanarRGB : public GenericVideoFilter
+  /**
+  * RGB(A) -> RGBP(A)
+  */
+{
+public:
+  PackedRGBtoPlanarRGB(PClip src, bool _sourceHasAlpha, bool _targetHasAlpha);
+  PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
+
+  int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
+    return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
+  }
+
+  const bool sourceHasAlpha;
+  const bool targetHasAlpha;
+};
+
+class PlanarRGBtoPackedRGB : public GenericVideoFilter
+  /**
+  * RGBP(A) -> RGB(A)
+  */
+{
+public:
+  PlanarRGBtoPackedRGB(PClip src, bool _targetHasAlpha);
+  PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
+
+  int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
+    return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
+  }
+
+  const bool targetHasAlpha;
+};
 
 #endif  // __Convert_RGB_H__

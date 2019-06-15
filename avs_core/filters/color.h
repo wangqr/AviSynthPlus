@@ -49,7 +49,8 @@ enum
 struct ColorYUVPlaneData
 {
     double average;
-    int real_min, real_max, loose_min, loose_max;
+    float real_min, real_max;
+    int loose_min, loose_max;
 };
 
 struct ColorYUVPlaneConfig
@@ -57,7 +58,8 @@ struct ColorYUVPlaneConfig
     double gain, offset, gamma, contrast;
     int range, plane;
     bool clip_tv;
-    bool changed;
+    bool changed; // for lut recalc
+    bool force_tv_range; // telling to have TV range for gamma when no other parameters
 };
 
 class ColorYUV : public GenericVideoFilter
@@ -68,21 +70,32 @@ public:
              double gain_u, double offset_u, double gamma_u, double contrast_u,
              double gain_v, double offset_v, double gamma_v, double contrast_v,
              const char* level, const char* opt,
-             bool colorbar, bool analyse, bool autowhite, bool autogain, bool conditional,
+             bool showyuv, bool analyse, bool autowhite, bool autogain, bool conditional,
+             int bits, bool showyuv_fullrange, // avs+
+             bool tweaklike_params, // ColorYUV2: 0.0/0.5/1.0/2.0/3.0 instead of -256/-128/0/256/512
+             const char *condVarSuffix,
              IScriptEnvironment* env);
 
     PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
     int __stdcall SetCacheHints(int cachehints, int frame_range) override
     {
-        return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
+      AVS_UNUSED(frame_range);
+      return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
     }
 
     static AVSValue Create(AVSValue args, void*, IScriptEnvironment* env);
 
+    ~ColorYUV();
+
 private:
     ColorYUVPlaneConfig configY, configU, configV;
-    bool colorbar, analyse, autowhite, autogain, conditional;
+    int colorbar_bits;
+    bool colorbar_fullrange;
+    bool analyse, autowhite, autogain, conditional;
+    bool tweaklike_params;
+    const char* condVarSuffix;
+    BYTE *luts[3];
 };
 
 #endif // __Color_h

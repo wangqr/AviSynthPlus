@@ -117,10 +117,17 @@ PVideoFrame __stdcall Cache::GetFrame(int n, IScriptEnvironment* env)
   std::chrono::time_point<std::chrono::high_resolution_clock> t_start, t_end; 
   t_start = std::chrono::high_resolution_clock::now(); // t_start starts in the constructor. Used in logging
 
-  LruLookupResult LruLookupRes = _pimpl->VideoCache->lookup(n, &cache_handle, true);
+  char buf[256];
+  std::string name = FuncName;
+  IScriptEnvironment2 *env2 = static_cast<IScriptEnvironment2*>(env);
+  _snprintf(buf, 255, "Cache::GetFrame lookup follows: [%s] n=%6d Thread=%zu", name.c_str(), n, env2->GetProperty(AEP_THREAD_ID));
+
+  LruLookupResult LruLookupRes = _pimpl->VideoCache->lookup(n, &cache_handle, true, result);
+  _snprintf(buf, 255, "Cache::GetFrame lookup ready: [%s] n=%6d Thread=%zu res=%d", name.c_str(), n, env2->GetProperty(AEP_THREAD_ID), (int)LruLookupRes);
   switch (LruLookupRes)
 #else
-  switch(_pimpl->VideoCache->lookup(n, &cache_handle, true))
+  // fill result in lookup before releasing cache handle lock
+  switch(_pimpl->VideoCache->lookup(n, &cache_handle, true, result))
 #endif
   {
   case LRU_LOOKUP_NOT_FOUND:
@@ -141,29 +148,12 @@ PVideoFrame __stdcall Cache::GetFrame(int n, IScriptEnvironment* env)
         throw;
       }
 #ifdef _DEBUG	
-#define SLOW_READOUT_TEST
-  #ifdef SLOW_READOUT_TEST
-      // at threadcount==8, when the _RPT1 debug line (or similar time-consuming command) is present here
-      // random frame==NULL return -> 0xC0000005
-      // !!! some process during the next 1/10000 seconds is overwriting the content of this cache handle (frame) with NULL!
-      // 1/10000 sec delay, but a simple _RPT debug line is enough, albeit the corruption occurs more rarely
-      std::chrono::time_point<std::chrono::high_resolution_clock> t_start2, t_end2;
-      std::chrono::duration<double> elapsed_seconds;
-      t_start2 = std::chrono::high_resolution_clock::now();
-      do {
-        t_end2 = std::chrono::high_resolution_clock::now();
-        elapsed_seconds = t_end2 - t_start2;
-      } while (elapsed_seconds.count() < 1.0 / 10000.0);
-      // end of delay
-      //assert(NULL != cache_handle.first->value); // and now it's NULL!!!
-      assert(NULL != result); // but previously saved value is NOT NULL!!!
-      // P.F. debug lines to be removed when the NULL pointer frame problem is surely solved
-  #endif
       t_end = std::chrono::high_resolution_clock::now();
-      elapsed_seconds = t_end - t_start;
+      std::chrono::duration<double> elapsed_seconds = t_end - t_start;
       std::string name = FuncName;
       char buf[256];
       if (NULL == cache_handle.first->value) {
+          // fixed bug but who knows
           _snprintf(buf, 255, "Cache::GetFrame LRU_LOOKUP_NOT_FOUND: HEY! got nulled! [%s] n=%6d child=%p frame=%p framebefore=%p SeekTimeWithGetFrame:%f\n", name.c_str(), n, (void *)_pimpl->child, (void *)cache_handle.first->value, (void *)result, elapsed_seconds.count()); // P.F.
           _RPT0(0, buf);
       } else {
@@ -178,13 +168,17 @@ PVideoFrame __stdcall Cache::GetFrame(int n, IScriptEnvironment* env)
     }
   case LRU_LOOKUP_FOUND_AND_READY:
     {
-      result = cache_handle.first->value;
+      // theoretically cache_handle here may point to wrong entry,
+      // because the lock in lookup is released before this readout
+      // solution:
+      // when LRU_LOOKUP_FOUND_AND_READY, the cache_handle.first->value is copied and returned in result itself
+      // result =  cache_handle.first->value; // old method not needed, result is filled already by lookup
 #ifdef _DEBUG	
       t_end = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double> elapsed_seconds = t_end - t_start;
       std::string name = FuncName;
       char buf[256];
-      _snprintf(buf, 255, "Cache::GetFrame LRU_LOOKUP_FOUND_AND_READY: [%s] n=%6d child=%p frame=%p vfb=%p videoCacheSize=%zu SeekTime            :%f\n", name.c_str(), n, (void *)_pimpl->child, (void *)cache_handle.first->value, (void *)cache_handle.first->value->GetFrameBuffer(), _pimpl->VideoCache->size(), elapsed_seconds.count()); // P.F.
+      _snprintf(buf, 255, "Cache::GetFrame LRU_LOOKUP_FOUND_AND_READY: [%s] n=%6d child=%p frame=%p vfb=%p videoCacheSize=%zu SeekTime            :%f\n", name.c_str(), n, (void *)_pimpl->child, (void *)result, (void *)result->GetFrameBuffer(), _pimpl->VideoCache->size(), elapsed_seconds.count());
       _RPT0(0, buf);
       assert(result != NULL);
 #endif
@@ -272,7 +266,7 @@ bool __stdcall Cache::GetParity(int n)
 
 int __stdcall Cache::SetCacheHints(int cachehints, int frame_range)
 {
-  _RPT3(0, "Cache::SetCacheHints called. cache=%p hint=%d frame_range=%d\n", (void *)this, cachehints, frame_range); // P.F.
+  // _RPT3(0, "Cache::SetCacheHints called. cache=%p hint=%d frame_range=%d\n", (void *)this, cachehints, frame_range);
   switch(cachehints)
   {
     /*********************************************
@@ -346,7 +340,7 @@ int __stdcall Cache::SetCacheHints(int cachehints, int frame_range)
       _pimpl->VideoCache->limits(&min, &max);
       max = frame_range;
       _pimpl->VideoCache->set_limits(min, max);
-      _RPT3(0, "Cache::SetCacheHints CACHE_SET_MAX_CAPACITY cache=%p hint=%d frame_range=%d\n", (void *)this, cachehints, frame_range); // P.F.
+      _RPT3(0, "Cache::SetCacheHints CACHE_SET_MAX_CAPACITY cache=%p hint=%d frame_range=%d\n", (void *)this, cachehints, frame_range);
       break;
     }
 

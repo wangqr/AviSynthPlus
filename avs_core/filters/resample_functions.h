@@ -36,11 +36,18 @@
 #define __Resample_Functions_H__
 
 #include <avisynth.h>
+#include "avs/alignment.h"
 
 // Original value: 65536
 // 2 bits sacrificed because of 16 bit signed MMX multiplication
 // NOTE: Don't change this value. It's hard-coded in SIMD code.
-const int FPScale = 16384; // fixed point scaler
+constexpr int FPScale8bits = 14; // fixed point scaler 14 bit
+constexpr int FPScale = 1 << FPScale8bits; // fixed point scaler (1<<14)
+// for 16 bits: one bit less
+constexpr int FPScale16bits = 13;
+constexpr int FPScale16 = 1 << FPScale16bits; // fixed point scaler for 10-16 bit SIMD signed operation
+constexpr int ALIGN_RESIZER_TARGET_SIZE = 8;
+constexpr int ALIGN_FLOAT_RESIZER_COEFF_SIZE = 8;
 
 // 09-14-2002 - Vlad59 - Lanczos3Resize - Constant added
 #define M_PI 3.14159265358979323846
@@ -50,23 +57,41 @@ struct ResamplingProgram {
   int source_size, target_size;
   double crop_start, crop_size;
   int filter_size;
+  int filter_size_alignment; // for info, 1 (C), 8 (sse or avx2) or 16 (avx2)
 
   // Array of Integer indicate starting point of sampling
   int* pixel_offset;
+
+  int bits_per_pixel;
 
   // Array of array of coefficient for each pixel
   // {{pixel[0]_coeff}, {pixel[1]_coeff}, ...}
   short* pixel_coefficient;
   float* pixel_coefficient_float;
 
-  ResamplingProgram(int filter_size, int source_size, int target_size, double crop_start, double crop_size, IScriptEnvironment2* env)
-    : filter_size(filter_size), source_size(source_size), target_size(target_size), crop_start(crop_start), crop_size(crop_size),
-      pixel_offset(0), pixel_coefficient(0), pixel_coefficient_float(0), Env(env)
+  // anti-overread helpers for float resizer simd code reading 8 pixels from a given offset
+  bool overread_possible;
+  int source_overread_offset; // offset from where reading 8 bytes requires masking garbage on the right side
+  int source_overread_beyond_targetx;
+
+  ResamplingProgram(int filter_size, int source_size, int target_size, double crop_start, double crop_size, int bits_per_pixel, IScriptEnvironment2* env)
+    : filter_size(filter_size), source_size(source_size), target_size(target_size), crop_start(crop_start), crop_size(crop_size), bits_per_pixel(bits_per_pixel),
+    pixel_offset(0), pixel_coefficient(0), pixel_coefficient_float(0), Env(env)
   {
-    pixel_offset = (int*) Env->Allocate(sizeof(int) * target_size, 64, AVS_NORMAL_ALLOC); // 64-byte alignment
-    pixel_coefficient = (short*) Env->Allocate(sizeof(short) * target_size * filter_size, 64, AVS_NORMAL_ALLOC);
-    pixel_coefficient_float = (float*) Env->Allocate(sizeof(float) * target_size * filter_size, 64, AVS_NORMAL_ALLOC);
-    if (!pixel_offset || !pixel_coefficient || !pixel_coefficient_float) {
+    overread_possible = false;
+    source_overread_offset = -1;
+    source_overread_beyond_targetx = -1;
+
+    // align target_size to 8 units to allow safe 8 pixels/cycle in H resizers
+    // pixel_offset is in unrolled loop, 128/256bit simd size does not affect.
+    pixel_offset = (int*)Env->Allocate(sizeof(int) * AlignNumber(target_size, ALIGN_RESIZER_TARGET_SIZE), 64, AVS_NORMAL_ALLOC); // 64-byte alignment
+    filter_size_alignment = 1; // just info. nothing special, for C. resize_h_prepare_coeff_8or16 can override and realign the coefficients for SIMD processing
+    if (bits_per_pixel < 32)
+      pixel_coefficient = (short*)Env->Allocate(sizeof(short) * target_size * filter_size, 64, AVS_NORMAL_ALLOC);
+    else
+      pixel_coefficient_float = (float*)Env->Allocate(sizeof(float) * target_size * filter_size, 64, AVS_NORMAL_ALLOC);
+
+    if (!pixel_offset || (!pixel_coefficient && bits_per_pixel < 32) || (!pixel_coefficient_float && bits_per_pixel == 32)) {
       Env->Free(pixel_offset);
       Env->Free(pixel_coefficient);
       Env->Free(pixel_coefficient_float);
@@ -101,7 +126,7 @@ public:
   virtual double f(double x) = 0;
   virtual double support() = 0;
 
-  virtual ResamplingProgram* GetResamplingProgram(int source_size, double crop_start, double crop_size, int target_size, IScriptEnvironment2* env);
+  virtual ResamplingProgram* GetResamplingProgram(int source_size, double crop_start, double crop_size, int target_size, int bits_per_pixel, IScriptEnvironment2* env);
 };
 
 class PointFilter : public ResamplingFunction 
@@ -132,7 +157,7 @@ class MitchellNetravaliFilter : public ResamplingFunction
  **/
 {
 public:
-  MitchellNetravaliFilter(double b, double c);
+  MitchellNetravaliFilter(double b = 1. / 3., double c = 1. / 3.);
   double f(double x);
   double support() { return 2.0; }
 
@@ -146,7 +171,7 @@ class LanczosFilter : public ResamplingFunction
  **/
 {
 public:
-  LanczosFilter(int taps);
+  LanczosFilter(int _taps = 3);
 	double f(double x);
 	double support() { return taps; };
 
@@ -161,7 +186,7 @@ class BlackmanFilter : public ResamplingFunction
  **/
 {
 public:
-  BlackmanFilter(int taps);
+  BlackmanFilter(int _taps = 4);
 	double f(double x);
 	double support() { return taps; };
 
@@ -215,7 +240,7 @@ class GaussianFilter : public ResamplingFunction
  **/
 {
 public:
-  GaussianFilter(double p);
+  GaussianFilter(double p = 30.0);
 	double f(double x);
 	double support() { return 4.0; };
 
@@ -229,7 +254,7 @@ class SincFilter : public ResamplingFunction
  **/
 {
 public:
-  SincFilter(int taps);
+  SincFilter(int _taps = 4);
 	double f(double x);
 	double support() { return taps; };
 

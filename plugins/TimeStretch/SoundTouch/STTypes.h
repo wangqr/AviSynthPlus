@@ -8,13 +8,6 @@
 ///
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Last changed  : $Date: 2015-05-18 18:25:07 +0300 (Mon, 18 May 2015) $
-// File revision : $Revision: 3 $
-//
-// $Id: STTypes.h 215 2015-05-18 15:25:07Z oparviai $
-//
-////////////////////////////////////////////////////////////////////////////////
-//
 // License :
 //
 //  SoundTouch audio processing library
@@ -57,12 +50,17 @@ typedef unsigned long   ulong;
 #if (defined(__GNUC__) && !defined(ANDROID))
     // In GCC, include soundtouch_config.h made by config scritps.
     // Skip this in Android compilation that uses GCC but without configure scripts.
-    #include "soundtouch_config.h"
+
+    // FIXME: check it what is does, because it compiles nicely without this line
+    // #include "soundtouch_config.h"
 #endif
 
 
 namespace soundtouch
 {
+    /// Max allowed number of channels
+    #define SOUNDTOUCH_MAX_CHANNELS     16
+
     /// Activate these undef's to overrule the possible sampletype 
     /// setting inherited from some other header file:
     //#undef SOUNDTOUCH_INTEGER_SAMPLES
@@ -143,8 +141,10 @@ namespace soundtouch
         #endif // SOUNDTOUCH_FLOAT_SAMPLES
 
         #ifdef SOUNDTOUCH_ALLOW_X86_OPTIMIZATIONS
-            // Allow MMX optimizations
-            #define SOUNDTOUCH_ALLOW_MMX   1
+            // Allow MMX optimizations (not available in X64 mode)
+            #if (!_M_X64)
+                #define SOUNDTOUCH_ALLOW_MMX   1
+            #endif
         #endif
 
     #else

@@ -37,6 +37,9 @@
 
 #include <avisynth.h>
 
+#ifdef NEW_AVSVALUE
+#include <vector>
+#endif
 
 /********************************************************************
 ********************************************************************/
@@ -104,11 +107,16 @@ private:
 class ExpConstant : public Expression 
 {
 public:
+#ifdef NEW_AVSVALUE
+  ExpConstant(std::vector<AVSValue>* v) : val(v->data(), (int)(v->size())) {} // array of AVSValue*
+#endif
   ExpConstant(AVSValue v) : val(v) {}
   ExpConstant(int i) : val(i) {}
   ExpConstant(float f) : val(f) {}
   ExpConstant(const char* s) : val(s) {}
-  virtual AVSValue Evaluate(IScriptEnvironment* env) { return val; }
+  virtual AVSValue Evaluate(IScriptEnvironment* env) {
+    AVS_UNUSED(env);
+    return val; }
 
 private:
   friend class ExpNegative;
@@ -381,11 +389,14 @@ class ExpAssignment : public Expression
 {
 public:
   ExpAssignment(const char* _lhs, const PExpression& _rhs) : lhs(_lhs), rhs(_rhs) {}
+  ExpAssignment(const char* _lhs, const PExpression& _rhs, bool wr) : lhs(_lhs), rhs(_rhs), withret(wr) {}
+
   virtual AVSValue Evaluate(IScriptEnvironment* env);
 
 private:
   const char* const lhs;
   PExpression rhs;
+  bool withret = false;
 };
 
 

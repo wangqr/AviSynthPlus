@@ -47,6 +47,12 @@
 #include "../internal.h"
 #include "../Prefetcher.h"
 #include "../InternalEnvironment.h"
+#include <map>
+
+#ifndef MINGW_HAS_SECURE_API
+#define sprintf_s sprintf
+#endif
+
 
 
 /********************************************************************
@@ -119,6 +125,7 @@ extern const AVSFunction Script_functions[] = {
   { "bitset",    BUILTIN_FUNC_PREFIX, "ii",BitSet},
   { "bittst",    BUILTIN_FUNC_PREFIX, "ii",BitTst},
   { "bittest",   BUILTIN_FUNC_PREFIX, "ii",BitTst},
+  { "bitsetcount", BUILTIN_FUNC_PREFIX, "i+",BitSetCount }, // avs+ 180221
 
   { "lcase",    BUILTIN_FUNC_PREFIX, "s",LCase},
   { "ucase",    BUILTIN_FUNC_PREFIX, "s",UCase},
@@ -129,6 +136,10 @@ extern const AVSFunction Script_functions[] = {
   { "rightstr", BUILTIN_FUNC_PREFIX, "si",RightStr},
   { "findstr",  BUILTIN_FUNC_PREFIX, "ss",FindStr},
   { "fillstr",  BUILTIN_FUNC_PREFIX, "i[]s",FillStr},
+  { "replacestr", BUILTIN_FUNC_PREFIX, "sss[sig]b",ReplaceStr}, // avs+ 161230, case 180222
+  { "trimall",  BUILTIN_FUNC_PREFIX, "s",TrimAll }, // avs+ 180225 diff name of clip-function Trim
+  { "trimleft", BUILTIN_FUNC_PREFIX, "s",TrimLeft }, // avs+ 180225
+  { "trimright", BUILTIN_FUNC_PREFIX, "s",TrimRight }, // avs+ 180225
 
   { "strcmp",   BUILTIN_FUNC_PREFIX, "ss",StrCmp},
   { "strcmpi",  BUILTIN_FUNC_PREFIX, "ss",StrCmpi},
@@ -173,7 +184,7 @@ extern const AVSFunction Script_functions[] = {
   { "IsFrameBased",  BUILTIN_FUNC_PREFIX, "c", IsFrameBased },
   { "GetParity", BUILTIN_FUNC_PREFIX, "c[n]i", GetParity },
   { "String",    BUILTIN_FUNC_PREFIX, ".[]s", String },
-  { "Hex",       BUILTIN_FUNC_PREFIX, "i", Hex },
+  { "Hex",       BUILTIN_FUNC_PREFIX, "i[width]i", Hex }, // avs+ 20180222 new width parameter
 
   { "IsBool",   BUILTIN_FUNC_PREFIX, ".", IsBool },
   { "IsInt",    BUILTIN_FUNC_PREFIX, ".", IsInt },
@@ -187,7 +198,7 @@ extern const AVSFunction Script_functions[] = {
   { "Eval",   BUILTIN_FUNC_PREFIX, "s[name]s", Eval },
   { "Eval",   BUILTIN_FUNC_PREFIX, "cs[name]s", EvalOop },
   { "Apply",  BUILTIN_FUNC_PREFIX, "s.*", Apply },
-  { "Import", BUILTIN_FUNC_PREFIX, "s+", Import },
+  { "Import", BUILTIN_FUNC_PREFIX, "s+[utf8]b", Import },
 
   { "Assert", BUILTIN_FUNC_PREFIX, "b[message]s", Assert },
   { "Assert", BUILTIN_FUNC_PREFIX, "s", AssertEval },
@@ -207,7 +218,7 @@ extern const AVSFunction Script_functions[] = {
   { "float", BUILTIN_FUNC_PREFIX, "f",Float},
 
   { "value",    BUILTIN_FUNC_PREFIX, "s",Value},
-  { "hexvalue", BUILTIN_FUNC_PREFIX, "s",HexValue},
+  { "hexvalue", BUILTIN_FUNC_PREFIX, "s[pos]i",HexValue}, // avs+ 20180222 new pos parameter
 
   { "VersionNumber", BUILTIN_FUNC_PREFIX, "", VersionNumber },
   { "VersionString", BUILTIN_FUNC_PREFIX, "", VersionString },
@@ -221,6 +232,9 @@ extern const AVSFunction Script_functions[] = {
   { "ScriptName", BUILTIN_FUNC_PREFIX, "", ScriptName },
   { "ScriptFile", BUILTIN_FUNC_PREFIX, "", ScriptFile },
   { "ScriptDir",  BUILTIN_FUNC_PREFIX, "", ScriptDir  },
+  { "ScriptNameUtf8", BUILTIN_FUNC_PREFIX, "", ScriptNameUtf8 },
+  { "ScriptFileUtf8", BUILTIN_FUNC_PREFIX, "", ScriptFileUtf8 },
+  { "ScriptDirUtf8",  BUILTIN_FUNC_PREFIX, "", ScriptDirUtf8 },
 
   { "PixelType",  BUILTIN_FUNC_PREFIX, "c", PixelType  },
 
@@ -246,7 +260,33 @@ extern const AVSFunction Script_functions[] = {
   { "IsYUVA",       BUILTIN_FUNC_PREFIX, "c", IsYUVA },
   { "IsPlanarRGB",  BUILTIN_FUNC_PREFIX, "c", IsPlanarRGB },
   { "IsPlanarRGBA", BUILTIN_FUNC_PREFIX, "c", IsPlanarRGBA },
+  { "ColorSpaceNameToPixelType",  BUILTIN_FUNC_PREFIX, "s", ColorSpaceNameToPixelType },
+  { "NumComponents", BUILTIN_FUNC_PREFIX, "c", NumComponents }, // r2348+
+  { "HasAlpha", BUILTIN_FUNC_PREFIX, "c", HasAlpha }, // r2348+
+  { "IsPackedRGB", BUILTIN_FUNC_PREFIX, "c", IsPackedRGB }, // r2348+
+  { "IsVideoFloat", BUILTIN_FUNC_PREFIX, "c", IsVideoFloat }, // r2435+
 
+  { "GetProcessInfo", BUILTIN_FUNC_PREFIX, "[type]i", GetProcessInfo }, // 170526-
+  { "StrToUtf8", BUILTIN_FUNC_PREFIX, "s", StrToUtf8 }, // 170601-
+  { "StrFromUtf8", BUILTIN_FUNC_PREFIX, "s", StrFromUtf8 }, // 170601-
+
+  { "IsFloatUvZeroBased", BUILTIN_FUNC_PREFIX, "", IsFloatUvZeroBased }, // 180516-
+  { "BuildPixelType", BUILTIN_FUNC_PREFIX, "[family]s[bits]i[chroma]i[compat]b[oldnames]b[sample_clip]c", BuildPixelType }, // 180517-
+  { "VarExist", BUILTIN_FUNC_PREFIX, "s", VarExist }, // 180606-
+
+
+#ifdef NEW_AVSVALUE
+  { "Array", BUILTIN_FUNC_PREFIX, ".+", ArrayCreate },  // # instead of +: creates script array
+  { "IsArray",   BUILTIN_FUNC_PREFIX, ".", IsArray },
+  { "ArrayGet",  BUILTIN_FUNC_PREFIX, "as", ArrayGet },
+  { "ArrayGet",  BUILTIN_FUNC_PREFIX, "a.+", ArrayGet }, // multidimensional
+  { "ArraySize", BUILTIN_FUNC_PREFIX, "a", ArraySize },
+  /*
+  { "ArrayAdd",  BUILTIN_FUNC_PREFIX, ".i*", ArrayAdd },
+  { "ArrayDel",  BUILTIN_FUNC_PREFIX, ".i", ArrayDel },
+  { "ArrayIns",  BUILTIN_FUNC_PREFIX, ".i", ArrayDel },
+  */
+#endif
   { 0 }
 };
 
@@ -295,35 +335,118 @@ void ScriptFunction::Delete(void* self, IScriptEnvironment*)
 }
 
 
+/***********************************
+ *******   wchar_t-utf-ansi   ******
+ **********************************/
+
+std::unique_ptr<char[]> WideCharToUtf8(const wchar_t *w_string)
+{
+  const auto utf8len = WideCharToMultiByte(CP_UTF8, 0, w_string, -1, NULL, 0, 0, 0) - 1; // w/o the \0 terminator
+  auto s_utf8 = std::make_unique<char[]>(utf8len + 1);
+  WideCharToMultiByte(CP_UTF8, 0, w_string, -1, s_utf8.get(), (int)utf8len + 1, 0, 0);
+  return s_utf8;
+}
+
+std::unique_ptr<char[]> WideCharToAnsi(const wchar_t *w_string)
+{
+  const auto len = wcslen(w_string);
+  auto s_ansi = std::make_unique<char[]>(len + 1);
+  WideCharToMultiByte(AreFileApisANSI() ? CP_ACP : CP_OEMCP, 0, w_string, -1, s_ansi.get(), (int)len + 1, NULL, NULL); // replaces out-of-CP chars by ?
+  // int succ = wcstombs(s_ansi, w_string, len +1); 
+  // no good, stops at non-replacable unicode chars. If wcstombs encounters a wide character it cannot convert to a multibyte character, it returns –1 cast to type size_t and sets errno to EILSEQ.
+  return s_ansi;
+}
+
+std::unique_ptr<char[]> WideCharToAnsiACP(const wchar_t *w_string)
+{
+  const auto len = wcslen(w_string);
+  auto s_ansi = std::make_unique<char[]>(len + 1);
+  WideCharToMultiByte(CP_ACP, 0, w_string, -1, s_ansi.get(), (int)len + 1, NULL, NULL); // replaces out-of-CP chars by ?
+  // int succ = wcstombs(s_ansi, w_string, len +1); 
+  // no good, stops at non-replacable unicode chars. If wcstombs encounters a wide character it cannot convert to a multibyte character, it returns –1 cast to type size_t and sets errno to EILSEQ.
+  return s_ansi;
+}
+
+std::unique_ptr<char[]> WideCharToUtf8_maxn(const wchar_t *w_string, size_t maxn)
+{
+  const auto utf8len = WideCharToMultiByte(CP_UTF8, 0, w_string, (int)maxn, NULL, 0, 0, 0); // no \0 terminator check requested here
+  auto s_utf8 = std::make_unique<char[]>(utf8len + 1);
+  WideCharToMultiByte(CP_UTF8, 0, w_string, -1, s_utf8.get(), utf8len, 0, 0);
+  s_utf8[utf8len] = 0;
+  return s_utf8;
+}
+
+std::unique_ptr<char[]> WideCharToAnsi_maxn(const wchar_t *w_string, size_t maxn)
+{
+  auto s_ansi = std::make_unique<char[]>(maxn + 1);
+  WideCharToMultiByte(AreFileApisANSI() ? CP_ACP : CP_OEMCP, 0, w_string, -1, s_ansi.get(), (int)maxn, NULL, NULL); // replaces out-of-CP chars by ?
+  s_ansi[maxn] = 0;
+  return s_ansi;
+}
+
+std::unique_ptr<wchar_t[]> AnsiToWideChar(const char *s_ansi)
+{
+  const size_t bufsize = strlen(s_ansi) + 1;
+  auto w_string = std::make_unique<wchar_t[]>(bufsize);
+  MultiByteToWideChar(AreFileApisANSI() ? CP_ACP : CP_OEMCP, 0, s_ansi, -1, w_string.get(), (int)bufsize);
+  //mbstowcs(script_name_w, script_name, len); // ansi to wchar_t, does not convert properly out-of-the box
+  return w_string;
+}
+
+std::unique_ptr<wchar_t[]> AnsiToWideCharACP(const char *s_ansi)
+{
+  const size_t bufsize = strlen(s_ansi) + 1;
+  auto w_string = std::make_unique<wchar_t[]>(bufsize);
+  MultiByteToWideChar(CP_ACP, 0, s_ansi, -1, w_string.get(), (int)bufsize);
+  //mbstowcs(script_name_w, script_name, len); // ansi to wchar_t, does not convert properly out-of-the box
+  return w_string;
+}
+
+std::unique_ptr<wchar_t[]> Utf8ToWideChar(const char *s_ansi)
+{
+  const size_t wchars_count = MultiByteToWideChar(CP_UTF8, 0, s_ansi, -1, NULL, 0);
+  const size_t bufsize = wchars_count + 1;
+  auto w_string = std::make_unique<wchar_t[]>(bufsize);
+  MultiByteToWideChar(CP_UTF8, 0, s_ansi, -1, w_string.get(), (int)bufsize);
+  return w_string;
+}
 
 /***********************************
  *******   Helper Functions   ******
  **********************************/
 
-CWDChanger::CWDChanger(const char* new_cwd) :
-  old_working_directory(NULL)
+void CWDChanger::Init(const wchar_t* new_cwd) 
 {
-  DWORD cwdLen = GetCurrentDirectory(0, NULL);
-  old_working_directory = new char[cwdLen];
-  DWORD save_cwd_success = GetCurrentDirectory(cwdLen, old_working_directory);
-  BOOL set_cwd_success = SetCurrentDirectory(new_cwd);
+  // works in unicode internally
+  DWORD cwdLen = GetCurrentDirectoryW(0, NULL);
+  old_working_directory = std::make_unique<wchar_t[]>(cwdLen); // instead of new wchar_t[cwdLen];
+  DWORD save_cwd_success = GetCurrentDirectoryW(cwdLen, old_working_directory.get());
+  BOOL set_cwd_success = SetCurrentDirectoryW(new_cwd);
   restore = (save_cwd_success && set_cwd_success);
+}
+
+CWDChanger::CWDChanger(const wchar_t* new_cwd)
+{
+  Init(new_cwd);
+}
+
+CWDChanger::CWDChanger(const char* new_cwd)
+{
+  auto new_cwd_w = AnsiToWideChar(new_cwd);
+  Init(new_cwd_w.get());
 }
 
 CWDChanger::~CWDChanger(void)
 {
   if (restore)
-    SetCurrentDirectory(old_working_directory);
-
-  delete [] old_working_directory;
+    SetCurrentDirectoryW(old_working_directory.get());
 }
 
-DllDirChanger::DllDirChanger(const char* new_dir) :
-  old_directory(NULL)
+DllDirChanger::DllDirChanger(const char* new_dir)
 {
   DWORD len = GetDllDirectory (0, NULL);
-  old_directory = new char[len];
-  DWORD save_success = GetDllDirectory (len, old_directory);
+  old_directory = std::make_unique<char[]>(len + 1); // instead of new char[len+1]
+  DWORD save_success = GetDllDirectory (len, old_directory.get());
   BOOL set_success = SetDllDirectory(new_dir);
   restore = (save_success && set_success);
 }
@@ -331,9 +454,7 @@ DllDirChanger::DllDirChanger(const char* new_dir) :
 DllDirChanger::~DllDirChanger(void)
 {
   if (restore)
-    SetDllDirectory(old_directory);
-
-  delete [] old_directory;
+    SetDllDirectory(old_directory.get());
 }
 
 AVSValue Assert(AVSValue args, void*, IScriptEnvironment* env)
@@ -388,6 +509,10 @@ AVSValue EvalOop(AVSValue args, void*, IScriptEnvironment* env)
 
 AVSValue Import(AVSValue args, void*, IScriptEnvironment* env)
 {
+  // called as s+ or s+[Utf8]b
+  const bool bHasUTF8param = args.IsArray() && args.ArraySize() == 2 && args[1].IsBool();
+  const bool bUtf8 = bHasUTF8param ? args[1].AsBool(false) : false;
+
   args = args[0];
   AVSValue result;
 
@@ -397,58 +522,86 @@ AVSValue Import(AVSValue args, void*, IScriptEnvironment* env)
   AVSValue lastScriptName = env->GetVarDef("$ScriptName$");
   AVSValue lastScriptFile = env->GetVarDef("$ScriptFile$");
   AVSValue lastScriptDir  = env->GetVarDef("$ScriptDir$");
-  for (int i=0; i<args.ArraySize(); ++i) {
+
+  AVSValue lastScriptNameUtf8 = env->GetVarDef("$ScriptNameUtf8$");
+  AVSValue lastScriptFileUtf8 = env->GetVarDef("$ScriptFileUtf8$");
+  AVSValue lastScriptDirUtf8 = env->GetVarDef("$ScriptDirUtf8$");
+
+  for (int i = 0; i < args.ArraySize(); ++i) {
     const char* script_name = args[i].AsString();
 
-    TCHAR full_path[AVS_MAX_PATH];
-    TCHAR* file_part;
-    if (strchr(script_name, '\\') || strchr(script_name, '/')) {
-      DWORD len = GetFullPathName(script_name, AVS_MAX_PATH, full_path, &file_part);
-      if (len == 0 || len > AVS_MAX_PATH)
+    wchar_t full_path_w[MAX_PATH];
+    wchar_t *file_part_w;
+
+      // Handling utf8 and ansi, working in wchar_t internally
+      // filename and path can be full unicode
+      // unicode input can come from CAVIFileSynth
+
+    // make wchar_t full path strnig from either ansi or utf8
+    auto script_name_w = !bUtf8 ? AnsiToWideChar(script_name) : Utf8ToWideChar(script_name);
+
+    if (wcschr(script_name_w.get(), '\\') || wcschr(script_name_w.get(), '/')) {
+      DWORD len = GetFullPathNameW(script_name_w.get(), MAX_PATH, full_path_w, &file_part_w);
+      if (len == 0 || len > MAX_PATH)
         env->ThrowError("Import: unable to open \"%s\" (path invalid?), error=0x%x", script_name, GetLastError());
-    } else {
-      DWORD len = SearchPath(NULL, script_name, NULL, AVS_MAX_PATH, full_path, &file_part);
-      if (len == 0 || len > AVS_MAX_PATH)
+    }
+    else {
+      DWORD len = SearchPathW(NULL, script_name_w.get(), NULL, MAX_PATH, full_path_w, &file_part_w);
+      if (len == 0 || len > MAX_PATH)
         env->ThrowError("Import: unable to locate \"%s\" (try specifying a path), error=0x%x", script_name, GetLastError());
     }
 
-    HANDLE h = ::CreateFile(full_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    // back to 8 bit Ansi and Utf8
+    auto full_path = WideCharToAnsi(full_path_w);
+    auto full_path_utf8 = WideCharToUtf8(full_path_w);
+    auto file_part = WideCharToAnsi(file_part_w);
+    auto file_part_utf8 = WideCharToUtf8(file_part_w);
+    size_t dir_part_len = wcslen(full_path_w) - wcslen(file_part_w);
+    auto dir_part = WideCharToAnsi_maxn(full_path_w, dir_part_len);
+    auto dir_part_utf8 = WideCharToUtf8_maxn(full_path_w, dir_part_len);
+
+    HANDLE h = ::CreateFileW(full_path_w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE)
-      env->ThrowError("Import: couldn't open \"%s\"", full_path);
+      env->ThrowError("Import: couldn't open \"%s\"", full_path.get());
 
-    size_t dir_part_len = file_part - full_path;
-
-    env->SetGlobalVar("$ScriptName$", env->SaveString(full_path));
-    env->SetGlobalVar("$ScriptFile$", env->SaveString(file_part));
-    env->SetGlobalVar("$ScriptDir$", env->SaveString(full_path, (int)dir_part_len));
+    env->SetGlobalVar("$ScriptName$", env->SaveString(full_path.get()));
+    env->SetGlobalVar("$ScriptFile$", env->SaveString(file_part.get()));
+    env->SetGlobalVar("$ScriptDir$", env->SaveString(dir_part.get()));
+    env->SetGlobalVar("$ScriptNameUtf8$", env->SaveString(full_path_utf8.get()));
+    env->SetGlobalVar("$ScriptFileUtf8$", env->SaveString(file_part_utf8.get()));
+    env->SetGlobalVar("$ScriptDirUtf8$", env->SaveString(dir_part_utf8.get()));
     if (MainScript)
     {
-      env->SetGlobalVar("$MainScriptName$", env->SaveString(full_path));
-      env->SetGlobalVar("$MainScriptFile$", env->SaveString(file_part));
-      env->SetGlobalVar("$MainScriptDir$", env->SaveString(full_path, (int)dir_part_len));
+      env->SetGlobalVar("$MainScriptName$", env->SaveString(full_path.get()));
+      env->SetGlobalVar("$MainScriptFile$", env->SaveString(file_part.get()));
+      env->SetGlobalVar("$MainScriptDir$", env->SaveString(dir_part.get()));
+      env->SetGlobalVar("$MainScriptNameUtf8$", env->SaveString(full_path_utf8.get()));
+      env->SetGlobalVar("$MainScriptFileUtf8$", env->SaveString(file_part_utf8.get()));
+      env->SetGlobalVar("$MainScriptDirUtf8$", env->SaveString(dir_part_utf8.get()));
     }
 
-    *file_part = 0;
-    CWDChanger change_cwd(full_path);
+    *file_part_w = 0; // trunc full_path_w to dir-only
+    CWDChanger change_cwd(full_path_w);
+    // end of filename parsing / file open things
 
     DWORD size = GetFileSize(h, NULL);
-    std::vector<char> buf(size+1, 0);
+    std::vector<char> buf(size + 1, 0);
     BOOL status = ReadFile(h, buf.data(), size, &size, NULL);
     CloseHandle(h);
     if (!status)
       env->ThrowError("Import: unable to read \"%s\"", script_name);
 
-    // Give Unicode smartarses a hint they need to use ANSI encoding
+    // Give poor Unicode users a hint they need to use ANSI encoding import"
     if (size >= 2) {
       unsigned char* q = reinterpret_cast<unsigned char*>(buf.data());
 
-      if ((q[0]==0xFF && q[1]==0xFE) || (q[0]==0xFE && q[1]==0xFF))
-          env->ThrowError("Import: Unicode source files are not supported, "
-                          "re-save script with ANSI encoding! : \"%s\"", script_name);
+      if ((q[0] == 0xFF && q[1] == 0xFE) || (q[0] == 0xFE && q[1] == 0xFF))
+        env->ThrowError("Import: Unicode source files are not supported, "
+          "re-save script with ANSI encoding! : \"%s\"", script_name);
 
-      if (q[0]==0xEF && q[1]==0xBB && q[2]==0xBF)
-          env->ThrowError("Import: UTF-8 source files are not supported, "
-                          "re-save script with ANSI encoding! : \"%s\"", script_name);
+      if (q[0] == 0xEF && q[1] == 0xBB && q[2] == 0xBF)
+        env->ThrowError("Import: UTF-8 source files are not supported, "
+          "re-save script with ANSI encoding! : \"%s\"", script_name);
     }
 
     buf[size] = 0;
@@ -459,6 +612,9 @@ AVSValue Import(AVSValue args, void*, IScriptEnvironment* env)
   env->SetGlobalVar("$ScriptName$", lastScriptName);
   env->SetGlobalVar("$ScriptFile$", lastScriptFile);
   env->SetGlobalVar("$ScriptDir$",  lastScriptDir);
+  env->SetGlobalVar("$ScriptNameUtf8$", lastScriptNameUtf8);
+  env->SetGlobalVar("$ScriptFileUtf8$", lastScriptFileUtf8);
+  env->SetGlobalVar("$ScriptDirUtf8$", lastScriptDirUtf8);
   envi->DecrImportDepth();
 
   return result;
@@ -468,49 +624,52 @@ AVSValue Import(AVSValue args, void*, IScriptEnvironment* env)
 AVSValue ScriptName(AVSValue args, void*, IScriptEnvironment* env) { return env->GetVarDef("$ScriptName$"); }
 AVSValue ScriptFile(AVSValue args, void*, IScriptEnvironment* env) { return env->GetVarDef("$ScriptFile$"); }
 AVSValue ScriptDir (AVSValue args, void*, IScriptEnvironment* env) { return env->GetVarDef("$ScriptDir$" ); }
+AVSValue ScriptNameUtf8(AVSValue args, void*, IScriptEnvironment* env) { return env->GetVarDef("$ScriptNameUtf8$"); }
+AVSValue ScriptFileUtf8(AVSValue args, void*, IScriptEnvironment* env) { return env->GetVarDef("$ScriptFileUtf8$"); }
+AVSValue ScriptDirUtf8(AVSValue args, void*, IScriptEnvironment* env) { return env->GetVarDef("$ScriptDirUtf8$"); }
 
 AVSValue SetMemoryMax(AVSValue args, void*, IScriptEnvironment* env) { return env->SetMemoryMax(args[0].AsInt(0)); }
 AVSValue SetWorkingDir(AVSValue args, void*, IScriptEnvironment* env) { return env->SetWorkingDir(args[0].AsString()); }
 
-AVSValue Muldiv(AVSValue args, void*, IScriptEnvironment* env) { return int(MulDiv(args[0].AsInt(), args[1].AsInt(), args[2].AsInt())); }
+AVSValue Muldiv(AVSValue args, void*, IScriptEnvironment* ) { return int(MulDiv(args[0].AsInt(), args[1].AsInt(), args[2].AsInt())); }
 
-AVSValue Floor(AVSValue args, void*, IScriptEnvironment* env) { return int(floor(args[0].AsFloat())); }
-AVSValue Ceil(AVSValue args, void*, IScriptEnvironment* env) { return int(ceil(args[0].AsFloat())); }
-AVSValue Round(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsFloat()<0 ? -int(-args[0].AsFloat()+.5) : int(args[0].AsFloat()+.5); }
+AVSValue Floor(AVSValue args, void*, IScriptEnvironment* ) { return int(floor(args[0].AsFloat())); }
+AVSValue Ceil(AVSValue args, void*, IScriptEnvironment* ) { return int(ceil(args[0].AsFloat())); }
+AVSValue Round(AVSValue args, void*, IScriptEnvironment* ) { return args[0].AsFloat()<0 ? -int(-args[0].AsFloat()+.5) : int(args[0].AsFloat()+.5); }
 
-AVSValue Acos(AVSValue args, void* user_data, IScriptEnvironment* env) { return acos(args[0].AsFloat()); }
-AVSValue Asin(AVSValue args, void* user_data, IScriptEnvironment* env) { return asin(args[0].AsFloat()); }
-AVSValue Atan(AVSValue args, void* user_data, IScriptEnvironment* env) { return atan(args[0].AsFloat()); }
-AVSValue Atan2(AVSValue args, void* user_data, IScriptEnvironment* env) { return atan2(args[0].AsFloat(), args[1].AsFloat()); }
-AVSValue Cos(AVSValue args, void* user_data, IScriptEnvironment* env) { return cos(args[0].AsFloat()); }
-AVSValue Cosh(AVSValue args, void* user_data, IScriptEnvironment* env) { return cosh(args[0].AsFloat()); }
-AVSValue Exp(AVSValue args, void* user_data, IScriptEnvironment* env) { return exp(args[0].AsFloat()); }
-AVSValue Fmod(AVSValue args, void* user_data, IScriptEnvironment* env) { return fmod(args[0].AsFloat(), args[1].AsFloat()); }
-AVSValue Log(AVSValue args, void* user_data, IScriptEnvironment* env) { return log(args[0].AsFloat()); }
-AVSValue Log10(AVSValue args, void* user_data, IScriptEnvironment* env) { return log10(args[0].AsFloat()); }
-AVSValue Pow(AVSValue args, void* user_data, IScriptEnvironment* env) { return pow(args[0].AsFloat(),args[1].AsFloat()); }
-AVSValue Sin(AVSValue args, void* user_data, IScriptEnvironment* env) { return sin(args[0].AsFloat()); }
-AVSValue Sinh(AVSValue args, void* user_data, IScriptEnvironment* env) { return sinh(args[0].AsFloat()); }
-AVSValue Tan(AVSValue args, void* user_data, IScriptEnvironment* env) { return tan(args[0].AsFloat()); }
-AVSValue Tanh(AVSValue args, void* user_data, IScriptEnvironment* env) { return tanh(args[0].AsFloat()); }
-AVSValue Sqrt(AVSValue args, void* user_data, IScriptEnvironment* env) { return sqrt(args[0].AsFloat()); }
+AVSValue Acos(AVSValue args, void* , IScriptEnvironment* ) { return acos(args[0].AsFloat()); }
+AVSValue Asin(AVSValue args, void* , IScriptEnvironment* ) { return asin(args[0].AsFloat()); }
+AVSValue Atan(AVSValue args, void* , IScriptEnvironment* ) { return atan(args[0].AsFloat()); }
+AVSValue Atan2(AVSValue args, void* , IScriptEnvironment* ) { return atan2(args[0].AsFloat(), args[1].AsFloat()); }
+AVSValue Cos(AVSValue args, void* , IScriptEnvironment* ) { return cos(args[0].AsFloat()); }
+AVSValue Cosh(AVSValue args, void* , IScriptEnvironment* ) { return cosh(args[0].AsFloat()); }
+AVSValue Exp(AVSValue args, void* , IScriptEnvironment* ) { return exp(args[0].AsFloat()); }
+AVSValue Fmod(AVSValue args, void* , IScriptEnvironment* ) { return fmod(args[0].AsFloat(), args[1].AsFloat()); }
+AVSValue Log(AVSValue args, void* , IScriptEnvironment* ) { return log(args[0].AsFloat()); }
+AVSValue Log10(AVSValue args, void* , IScriptEnvironment* ) { return log10(args[0].AsFloat()); }
+AVSValue Pow(AVSValue args, void* , IScriptEnvironment* ) { return pow(args[0].AsFloat(),args[1].AsFloat()); }
+AVSValue Sin(AVSValue args, void* , IScriptEnvironment* ) { return sin(args[0].AsFloat()); }
+AVSValue Sinh(AVSValue args, void* , IScriptEnvironment* ) { return sinh(args[0].AsFloat()); }
+AVSValue Tan(AVSValue args, void* , IScriptEnvironment* ) { return tan(args[0].AsFloat()); }
+AVSValue Tanh(AVSValue args, void* , IScriptEnvironment* ) { return tanh(args[0].AsFloat()); }
+AVSValue Sqrt(AVSValue args, void* , IScriptEnvironment* ) { return sqrt(args[0].AsFloat()); }
 
-AVSValue Abs(AVSValue args, void* user_data, IScriptEnvironment* env) { return abs(args[0].AsInt()); }
-AVSValue FAbs(AVSValue args, void* user_data, IScriptEnvironment* env) { return fabs(args[0].AsFloat()); }
-AVSValue Pi(AVSValue args, void* user_data, IScriptEnvironment* env)  { return 3.14159265358979324; }
+AVSValue Abs(AVSValue args, void* , IScriptEnvironment* ) { return abs(args[0].AsInt()); }
+AVSValue FAbs(AVSValue args, void* , IScriptEnvironment* ) { return fabs(args[0].AsFloat()); }
+AVSValue Pi(AVSValue args, void* , IScriptEnvironment* )  { return 3.14159265358979324; }
 #ifdef OPT_ScriptFunctionTau
-AVSValue Tau(AVSValue args, void* user_data, IScriptEnvironment* env) { return 6.28318530717958648; }
+AVSValue Tau(AVSValue args, void* , IScriptEnvironment* ) { return 6.28318530717958648; }
 #endif
-AVSValue Sign(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsFloat()==0 ? 0 : args[0].AsFloat() > 0 ? 1 : -1; }
+AVSValue Sign(AVSValue args, void*, IScriptEnvironment* ) { return args[0].AsFloat()==0 ? 0 : args[0].AsFloat() > 0 ? 1 : -1; }
 
-AVSValue BitAnd(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsInt() & args[1].AsInt(); }
-AVSValue BitNot(AVSValue args, void*, IScriptEnvironment* env) { return ~args[0].AsInt(); }
-AVSValue BitOr(AVSValue args, void*, IScriptEnvironment* env)  { return args[0].AsInt() | args[1].AsInt(); }
-AVSValue BitXor(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsInt() ^ args[1].AsInt(); }
+AVSValue BitAnd(AVSValue args, void*, IScriptEnvironment* ) { return args[0].AsInt() & args[1].AsInt(); }
+AVSValue BitNot(AVSValue args, void*, IScriptEnvironment* ) { return ~args[0].AsInt(); }
+AVSValue BitOr(AVSValue args, void*, IScriptEnvironment* )  { return args[0].AsInt() | args[1].AsInt(); }
+AVSValue BitXor(AVSValue args, void*, IScriptEnvironment* ) { return args[0].AsInt() ^ args[1].AsInt(); }
 
-AVSValue BitLShift(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsInt() << args[1].AsInt(); }
-AVSValue BitRShiftL(AVSValue args, void*, IScriptEnvironment* env) { return int(unsigned(args[0].AsInt()) >> unsigned(args[1].AsInt())); }
-AVSValue BitRShiftA(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsInt() >> args[1].AsInt(); }
+AVSValue BitLShift(AVSValue args, void*, IScriptEnvironment* ) { return args[0].AsInt() << args[1].AsInt(); }
+AVSValue BitRShiftL(AVSValue args, void*, IScriptEnvironment* ) { return int(unsigned(args[0].AsInt()) >> unsigned(args[1].AsInt())); }
+AVSValue BitRShiftA(AVSValue args, void*, IScriptEnvironment* ) { return args[0].AsInt() >> args[1].AsInt(); }
 
 static int a_rol(int value, int shift) {
   if ((shift &= sizeof(value)*8 - 1) == 0)
@@ -543,18 +702,35 @@ static bool a_bt (int value, int bit) {
   return (value & (1 << bit)) ? true : false;
 }
 
-AVSValue BitRotateL(AVSValue args, void*, IScriptEnvironment* env) { return a_rol(args[0].AsInt(), args[1].AsInt()); }
-AVSValue BitRotateR(AVSValue args, void*, IScriptEnvironment* env) { return a_ror(args[0].AsInt(), args[1].AsInt()); }
+AVSValue BitRotateL(AVSValue args, void*, IScriptEnvironment* ) { return a_rol(args[0].AsInt(), args[1].AsInt()); }
+AVSValue BitRotateR(AVSValue args, void*, IScriptEnvironment* ) { return a_ror(args[0].AsInt(), args[1].AsInt()); }
 
-AVSValue BitChg(AVSValue args, void*, IScriptEnvironment* env) { return a_btc(args[0].AsInt(), args[1].AsInt()); }
-AVSValue BitClr(AVSValue args, void*, IScriptEnvironment* env) { return a_btr(args[0].AsInt(), args[1].AsInt()); }
-AVSValue BitSet(AVSValue args, void*, IScriptEnvironment* env) { return a_bts(args[0].AsInt(), args[1].AsInt()); }
-AVSValue BitTst(AVSValue args, void*, IScriptEnvironment* env) { return a_bt (args[0].AsInt(), args[1].AsInt()); }
+AVSValue BitChg(AVSValue args, void*, IScriptEnvironment* ) { return a_btc(args[0].AsInt(), args[1].AsInt()); }
+AVSValue BitClr(AVSValue args, void*, IScriptEnvironment* ) { return a_btr(args[0].AsInt(), args[1].AsInt()); }
+AVSValue BitSet(AVSValue args, void*, IScriptEnvironment* ) { return a_bts(args[0].AsInt(), args[1].AsInt()); }
+AVSValue BitTst(AVSValue args, void*, IScriptEnvironment* ) { return a_bt (args[0].AsInt(), args[1].AsInt()); }
+
+static int numberOfSetBits(uint32_t i)
+{
+  i = i - ((i >> 1) & 0x55555555);
+  i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
+  return (((i + (i >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+}
+
+AVSValue BitSetCount(AVSValue args, void*, IScriptEnvironment*) {
+  if (args[0].IsInt())
+    return numberOfSetBits(args[0].AsInt());
+
+  int count = 0;
+  for (int i = 0; i < args[0].ArraySize(); i++)
+    count += numberOfSetBits(args[0][i].AsInt());
+  return count;
+}
 
 AVSValue UCase(AVSValue args, void*, IScriptEnvironment* env) { return _strupr(env->SaveString(args[0].AsString())); }
 AVSValue LCase(AVSValue args, void*, IScriptEnvironment* env) { return _strlwr(env->SaveString(args[0].AsString())); }
 
-AVSValue StrLen(AVSValue args, void*, IScriptEnvironment* env) { return int(strlen(args[0].AsString())); }
+AVSValue StrLen(AVSValue args, void*, IScriptEnvironment* ) { return int(strlen(args[0].AsString())); }
 AVSValue RevStr(AVSValue args, void*, IScriptEnvironment* env) { return _strrev(env->SaveString(args[0].AsString())); }
 
 AVSValue LeftStr(AVSValue args, void*, IScriptEnvironment* env)
@@ -606,17 +782,217 @@ AVSValue RightStr(AVSValue args, void*, IScriptEnvironment* env)
    return ret;
  }
 
-AVSValue StrCmp(AVSValue args, void*, IScriptEnvironment* env)
+AVSValue ReplaceStr(AVSValue args, void*, IScriptEnvironment* env) {
+  char const * const original = args[0].AsString();
+  char const * const pattern = args[1].AsString();
+  char const * const replacement = args[2].AsString();
+  const bool case_insensitive = args[3].AsBool(false);
+
+  const size_t replace_len = strlen(replacement);
+  const size_t pattern_len = strlen(pattern);
+  const size_t orig_len = strlen(original);
+
+  size_t pattern_count = 0;
+  const char * orig_ptr;
+  const char * pattern_location;
+
+  if (case_insensitive) {
+    char *original_lower = new(std::nothrow) char[sizeof(char) * (orig_len + 1)];
+    if (!original_lower) env->ThrowError("ReplaceStr: malloc failure!");
+    char *pattern_lower = new(std::nothrow) char[sizeof(char) * (pattern_len + 1)];
+    if (!pattern_lower) env->ThrowError("ReplaceStr: malloc failure!");
+
+    // make them lowercase for comparison
+    strcpy(original_lower, original);
+    strcpy(pattern_lower, pattern);
+#ifdef MSVC
+    // works fine also for accented ANSI characters
+    _locale_t locale = _create_locale(LC_ALL, ".ACP"); // Sets the locale to the ANSI code page obtained from the operating system.
+    _strlwr_l(original_lower, locale);
+    _strlwr_l(pattern_lower, locale);
+    _free_locale(locale);
+#else
+    _strlwr(original_lower);
+    _strlwr(pattern_lower);
+#endif
+
+    // find how many times the _lowercased_ pattern occurs in the _lowercased_ original string
+    for (orig_ptr = original_lower; pattern_location = strstr(orig_ptr, pattern_lower); orig_ptr = pattern_location + pattern_len)
+    {
+      pattern_count++;
+    }
+
+    // allocate memory for the new string
+    size_t const retlen = orig_len + pattern_count * (replace_len - pattern_len);
+    char *result = new(std::nothrow) char[sizeof(char) * (retlen + 1)];
+    if (!result) env->ThrowError("ReplaceStr: malloc failure!");
+    *result = 0;
+
+    // copy the original string,
+    // replacing all the instances of the pattern
+    const char * orig_upper_ptr;
+    char * result_ptr = result;
+    // handling dual pointer set: orig, uppercase
+    for (orig_ptr = original, orig_upper_ptr = original_lower;
+      pattern_location = strstr(orig_upper_ptr, pattern_lower);
+      orig_upper_ptr = pattern_location + pattern_len, orig_ptr = original + (orig_upper_ptr - original_lower))
+    {
+      const size_t skiplen = pattern_location - orig_upper_ptr;
+      // copy the section until the occurence of the pattern
+      strncpy(result_ptr, orig_ptr, skiplen);
+      result_ptr += skiplen;
+      // copy the replacement
+      strncpy(result_ptr, replacement, replace_len);
+      result_ptr += replace_len;
+    }
+    // copy rest
+    strcpy(result_ptr, orig_ptr);
+    AVSValue ret = env->SaveString(result);
+    delete[] result;
+    delete[] original_lower;
+    delete[] pattern_lower;
+    return ret;
+  }
+
+  // old case sensitive version
+
+    // find how many times the pattern occurs in the original string
+  for (orig_ptr = original; pattern_location = strstr(orig_ptr, pattern); orig_ptr = pattern_location + pattern_len)
+  {
+    pattern_count++;
+  }
+
+  // allocate memory for the new string
+  size_t const retlen = orig_len + pattern_count * (replace_len - pattern_len);
+  char *result = new(std::nothrow) char[sizeof(char) * (retlen + 1)];
+  if (!result) env->ThrowError("ReplaceStr: malloc failure!");
+  *result = 0;
+
+  // copy the original string,
+  // replacing all the instances of the pattern
+  char * result_ptr = result;
+  for (orig_ptr = original; pattern_location = strstr(orig_ptr, pattern); orig_ptr = pattern_location + pattern_len)
+  {
+    const size_t skiplen = pattern_location - orig_ptr;
+    // copy the section until the occurence of the pattern
+    strncpy(result_ptr, orig_ptr, skiplen);
+    result_ptr += skiplen;
+    // copy the replacement
+    strncpy(result_ptr, replacement, replace_len);
+    result_ptr += replace_len;
+  }
+  // copy rest
+  strcpy(result_ptr, orig_ptr);
+  AVSValue ret = env->SaveString(result);
+  delete[] result;
+  return ret;
+}
+
+AVSValue TrimLeft(AVSValue args, void*, IScriptEnvironment* env) 
+{ 
+  char const *original = args[0].AsString();
+  char const *s = original;
+  char ch;
+  // space, npsp, tab
+  while ((ch = *s) == (char)32 || ch == (char)160 || ch == (char)9)
+    s++;
+
+  if (original == s)
+    return args[0]; // avoid SaveString if no change
+
+  return env->SaveString(s);
+}
+
+AVSValue TrimRight(AVSValue args, void*, IScriptEnvironment* env)
+{
+  char const *original = args[0].AsString();
+  size_t len = strlen(original);
+  if (len == 0)
+    return args[0]; // avoid SaveString if no change
+
+  size_t orig_len = len;
+  char const *s = original + len;
+
+  char ch;
+  // space, npsp, tab
+  while ((len > 0) && ((ch = *--s) == (char)32 || ch == (char)160 || ch == (char)9)) {
+    len--;
+  }
+  
+  if(orig_len == len)
+    return args[0]; // avoid SaveString if no change
+
+  if (len == 0)
+    return env->SaveString("");
+
+  size_t retlen = s - original + 1;
+
+  char *result = new(std::nothrow) char[sizeof(char) * (retlen + 1)];
+  if (!result) env->ThrowError("TrimRight: malloc failure!");
+  strncpy(result, original, retlen);
+  result[retlen] = 0;
+
+  AVSValue ret = env->SaveString(result);
+  delete[] result;
+  return ret;
+}
+
+AVSValue TrimAll(AVSValue args, void*, IScriptEnvironment* env)
+{
+  // not simplify with calling Left/Right, avoid double SaveStrings
+
+  // like TrimLeft
+  char const *original = args[0].AsString();
+  if (!*original)
+    return args[0]; // avoid SaveString if no change
+
+  char ch;
+  // space, npsp, tab
+  while ((ch = *original) == (char)32 || ch == (char)160 || ch == (char)9)
+    original++;
+
+  // almost like TrimRight
+  size_t len = strlen(original);
+  if (len == 0)
+    return env->SaveString("");
+
+  size_t orig_len = len;
+  char const *s = original + len;
+
+  // space, npsp, tab
+  while ((len > 0) && ((ch = *--s) == (char)32 || ch == (char)160 || ch == (char)9))
+    len--;
+
+  if (orig_len == len)
+    return env->SaveString(original); // nothing to cut from right
+
+  if (len == 0)
+    return env->SaveString(""); // full cut
+
+  size_t retlen = s - original + 1;
+
+  char *result = new(std::nothrow) char[sizeof(char) * (retlen + 1)];
+  if (!result) env->ThrowError("TrimAll: malloc failure!");
+  strncpy(result, original, retlen);
+  result[retlen] = 0;
+
+  AVSValue ret = env->SaveString(result);
+  delete[] result;
+  return ret;
+}
+
+
+AVSValue StrCmp(AVSValue args, void*, IScriptEnvironment*)
 {
   return lstrcmp( args[0].AsString(), args[1].AsString() );
 }
 
-AVSValue StrCmpi(AVSValue args, void*, IScriptEnvironment* env)
+AVSValue StrCmpi(AVSValue args, void*, IScriptEnvironment*)
 {
   return lstrcmpi( args[0].AsString(), args[1].AsString() );
 }
 
-AVSValue FindStr(AVSValue args, void*, IScriptEnvironment* env)
+AVSValue FindStr(AVSValue args, void*, IScriptEnvironment*)
 {
   const char *pdest = strstr( args[0].AsString(),args[1].AsString() );
   int result = (int)(pdest - args[0].AsString() + 1);
@@ -624,7 +1000,7 @@ AVSValue FindStr(AVSValue args, void*, IScriptEnvironment* env)
   return result;
 }
 
-AVSValue Rand(AVSValue args, void* user_data, IScriptEnvironment* env)
+AVSValue Rand(AVSValue args, void*, IScriptEnvironment*)
  { int limit = args[0].AsInt(RAND_MAX);
    bool scale_mode = args[1].AsBool((abs(limit) > RAND_MAX));
 
@@ -648,11 +1024,11 @@ AVSValue Select(AVSValue args, void*, IScriptEnvironment* env)
   return args[1][i];
 }
 
-AVSValue NOP(AVSValue args, void*, IScriptEnvironment* env) { return 0;}
+AVSValue NOP(AVSValue args, void*, IScriptEnvironment*) { return 0;}
 
-AVSValue Undefined(AVSValue args, void*, IScriptEnvironment* env) { return AVSValue();}
+AVSValue Undefined(AVSValue args, void*, IScriptEnvironment*) { return AVSValue();}
 
-AVSValue Exist(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue Exist(AVSValue args, void*, IScriptEnvironment*nv) {
   const char *filename = args[0].AsString();
 
   if (strchr(filename, '*') || strchr(filename, '?')) // wildcard
@@ -737,7 +1113,7 @@ AVSValue AVSChr(AVSValue args, void*, IScriptEnvironment* env )
     return env->SaveString(s);
 }
 
-AVSValue AVSOrd(AVSValue args, void*, IScriptEnvironment* env )
+AVSValue AVSOrd(AVSValue args, void*, IScriptEnvironment*)
 {
     return (int)args[0].AsString()[0] & 0xFF;
 }
@@ -821,101 +1197,171 @@ AVSValue Spline(AVSValue args, void*, IScriptEnvironment* env )
 
 static inline const VideoInfo& VI(const AVSValue& arg) { return arg.AsClip()->GetVideoInfo(); }
 
-AVSValue PixelType (AVSValue args, void*, IScriptEnvironment* env) {
-  switch (VI(args[0]).pixel_type) {
-    case VideoInfo::CS_BGR24 :
-	  return "RGB24";
-    case VideoInfo::CS_BGR32 :
-	  return "RGB32";
-    case VideoInfo::CS_YUY2  :
-	  return "YUY2";
-    case VideoInfo::CS_YV24  :
-	  return "YV24";
-    case VideoInfo::CS_YV16  :
-	  return "YV16";
-    case VideoInfo::CS_YV12  :
-    case VideoInfo::CS_I420  :
-	  return "YV12";
-    case VideoInfo::CS_YUV9  :
-	  return "YUV9";
-    case VideoInfo::CS_YV411 :
-	  return "YV411";
-    case VideoInfo::CS_Y8    :
-	  return "Y8";
-    case VideoInfo::CS_YUV420P10 :    return "YUV420P10";
-    case VideoInfo::CS_YUV422P10 :    return "YUV422P10";
-    case VideoInfo::CS_YUV444P10 :    return "YUV444P10";
-    case VideoInfo::CS_Y10       :    return "Y10";
-    case VideoInfo::CS_YUV420P12 :    return "YUV420P12";
-    case VideoInfo::CS_YUV422P12 :    return "YUV422P12";
-    case VideoInfo::CS_YUV444P12 :    return "YUV444P12";
-    case VideoInfo::CS_Y12       :    return "Y12";
-    case VideoInfo::CS_YUV420P14 :    return "YUV420P14";
-    case VideoInfo::CS_YUV422P14 :    return "YUV422P14";
-    case VideoInfo::CS_YUV444P14 :    return "YUV444P14";
-    case VideoInfo::CS_Y14       :    return "Y14";
-    case VideoInfo::CS_YUV420P16 :    return "YUV420P16";
-    case VideoInfo::CS_YUV422P16 :    return "YUV422P16";
-    case VideoInfo::CS_YUV444P16 :    return "YUV444P16";
-    case VideoInfo::CS_Y16       :    return "Y16";
-    case VideoInfo::CS_YUV420PS  :    return "YUV420PS";
-    case VideoInfo::CS_YUV422PS  :    return "YUV422PS";
-    case VideoInfo::CS_YUV444PS  :    return "YUV444PS";
-    case VideoInfo::CS_Y32       :    return "Y32";
-    case VideoInfo::CS_BGR48     :    return "RGB48";
-    case VideoInfo::CS_BGR64     :    return "RGB64";
-    case VideoInfo::CS_RGBP      :    return "RGBP";
-    case VideoInfo::CS_RGBP10    :    return "RGBP10";
-    case VideoInfo::CS_RGBP12    :    return "RGBP12";
-    case VideoInfo::CS_RGBP14    :    return "RGBP14";
-    case VideoInfo::CS_RGBP16    :    return "RGBP16";
-    case VideoInfo::CS_RGBPS     :    return "RGBPS";
-    default:
-	  break;
-  }
-  return "";
+static const std::map<int, std::string> pixel_format_table =
+{ // names for lookup by pixel_type or name
+  {VideoInfo::CS_BGR24, "RGB24"},
+  {VideoInfo::CS_BGR32, "RGB32"},
+  {VideoInfo::CS_YUY2 , "YUY2"},
+  {VideoInfo::CS_YV24 , "YV24"},
+  {VideoInfo::CS_YV16 , "YV16"},
+  {VideoInfo::CS_YV12 , "YV12"},
+  {VideoInfo::CS_I420 , "YV12"},
+  {VideoInfo::CS_YUV9 , "YUV9"},
+  {VideoInfo::CS_YV411, "YV411"},
+  {VideoInfo::CS_Y8   , "Y8"},
+
+  {VideoInfo::CS_YUV420P10, "YUV420P10"},
+  {VideoInfo::CS_YUV422P10, "YUV422P10"},
+  {VideoInfo::CS_YUV444P10, "YUV444P10"},
+  {VideoInfo::CS_Y10      , "Y10"},
+  {VideoInfo::CS_YUV420P12, "YUV420P12"},
+  {VideoInfo::CS_YUV422P12, "YUV422P12"},
+  {VideoInfo::CS_YUV444P12, "YUV444P12"},
+  {VideoInfo::CS_Y12      , "Y12"},
+  {VideoInfo::CS_YUV420P14, "YUV420P14"},
+  {VideoInfo::CS_YUV422P14, "YUV422P14"},
+  {VideoInfo::CS_YUV444P14, "YUV444P14"},
+  {VideoInfo::CS_Y14      , "Y14"},
+  {VideoInfo::CS_YUV420P16, "YUV420P16"},
+  {VideoInfo::CS_YUV422P16, "YUV422P16"},
+  {VideoInfo::CS_YUV444P16, "YUV444P16"},
+  {VideoInfo::CS_Y16      , "Y16"},
+  {VideoInfo::CS_YUV420PS , "YUV420PS"},
+  {VideoInfo::CS_YUV422PS , "YUV422PS"},
+  {VideoInfo::CS_YUV444PS , "YUV444PS"},
+  {VideoInfo::CS_Y32      , "Y32"},
+
+  {VideoInfo::CS_BGR48    , "RGB48"},
+  {VideoInfo::CS_BGR64    , "RGB64"},
+
+  {VideoInfo::CS_RGBP     , "RGBP"},
+  {VideoInfo::CS_RGBP10   , "RGBP10"},
+  {VideoInfo::CS_RGBP12   , "RGBP12"},
+  {VideoInfo::CS_RGBP14   , "RGBP14"},
+  {VideoInfo::CS_RGBP16   , "RGBP16"},
+  {VideoInfo::CS_RGBPS    , "RGBPS"},
+
+  {VideoInfo::CS_YUVA420, "YUVA420"},
+  {VideoInfo::CS_YUVA422, "YUVA422"},
+  {VideoInfo::CS_YUVA444, "YUVA444"},
+  {VideoInfo::CS_YUVA420P10, "YUVA420P10"},
+  {VideoInfo::CS_YUVA422P10, "YUVA422P10"},
+  {VideoInfo::CS_YUVA444P10, "YUVA444P10"},
+  {VideoInfo::CS_YUVA420P12, "YUVA420P12"},
+  {VideoInfo::CS_YUVA422P12, "YUVA422P12"},
+  {VideoInfo::CS_YUVA444P12, "YUVA444P12"},
+  {VideoInfo::CS_YUVA420P14, "YUVA420P14"},
+  {VideoInfo::CS_YUVA422P14, "YUVA422P14"},
+  {VideoInfo::CS_YUVA444P14, "YUVA444P14"},
+  {VideoInfo::CS_YUVA420P16, "YUVA420P16"},
+  {VideoInfo::CS_YUVA422P16, "YUVA422P16"},
+  {VideoInfo::CS_YUVA444P16, "YUVA444P16"},
+  {VideoInfo::CS_YUVA420PS , "YUVA420PS"},
+  {VideoInfo::CS_YUVA422PS , "YUVA422PS"},
+  {VideoInfo::CS_YUVA444PS , "YUVA444PS"},
+
+  {VideoInfo::CS_RGBAP     , "RGBAP"},
+  {VideoInfo::CS_RGBAP10   , "RGBAP10"},
+  {VideoInfo::CS_RGBAP12   , "RGBAP12"},
+  {VideoInfo::CS_RGBAP14   , "RGBAP14"},
+  {VideoInfo::CS_RGBAP16   , "RGBAP16"},
+  {VideoInfo::CS_RGBAPS    , "RGBAPS"},
+};
+
+static const std::multimap<int, std::string> pixel_format_table_ex =
+{ // alternative names for lookup by name (multimap!)
+  {VideoInfo::CS_YV24 , "YUV444"},
+  {VideoInfo::CS_YV16 , "YUV422"},
+  {VideoInfo::CS_YV12 , "YUV420"},
+  {VideoInfo::CS_YV411, "YUV411"},
+  {VideoInfo::CS_RGBP , "RGBP8"},
+  {VideoInfo::CS_RGBAP, "RGBAP8"},
+  {VideoInfo::CS_YV24 , "YUV444P8"},
+  {VideoInfo::CS_YV16 , "YUV422P8"},
+  {VideoInfo::CS_YV12 , "YUV420P8"},
+  {VideoInfo::CS_YV411, "YUV411P8"},
+  {VideoInfo::CS_YUVA420, "YUVA420P8"},
+  {VideoInfo::CS_YUVA422, "YUVA422P8"},
+  {VideoInfo::CS_YUVA444, "YUVA444P8"},
+};
+
+const char *GetPixelTypeName(const int pixel_type)
+{
+  const std::string name = "";
+  auto it = pixel_format_table.find(pixel_type);
+  if (it == pixel_format_table.end())
+    return "";
+  return (it->second).c_str();
 }
 
-AVSValue Width(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).width; }
-AVSValue Height(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).height; }
-AVSValue FrameCount(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).num_frames; }
-AVSValue FrameRate(AVSValue args, void*, IScriptEnvironment* env) { const VideoInfo& vi = VI(args[0]); return (double)vi.fps_numerator / vi.fps_denominator; } // maximise available precision
-AVSValue FrameRateNumerator(AVSValue args, void*, IScriptEnvironment* env) { return (int)VI(args[0]).fps_numerator; } // unsigned int truncated to int
-AVSValue FrameRateDenominator(AVSValue args, void*, IScriptEnvironment* env) { return (int)VI(args[0]).fps_denominator; } // unsigned int truncated to int
-AVSValue AudioRate(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).audio_samples_per_second; }
-AVSValue AudioLength(AVSValue args, void*, IScriptEnvironment* env) { return (int)VI(args[0]).num_audio_samples; }  // Truncated to int
-AVSValue AudioLengthLo(AVSValue args, void*, IScriptEnvironment* env) { return (int)(VI(args[0]).num_audio_samples % (unsigned)args[1].AsInt(1000000000)); }
-AVSValue AudioLengthHi(AVSValue args, void*, IScriptEnvironment* env) { return (int)(VI(args[0]).num_audio_samples / (unsigned)args[1].AsInt(1000000000)); }
+const int GetPixelTypeFromName(const char *pixeltypename)
+{
+  std::string name_to_find = pixeltypename;
+  for (auto & c: name_to_find) c = toupper(c); // uppercase input string
+  for (auto it = pixel_format_table.begin(); it != pixel_format_table.end(); it++)
+  {
+    if ((it->second).compare(name_to_find) == 0)
+      return it->first;
+  }
+  // find by alternative names e.g. YUV420 or YUV420P8 instead of YV12
+  for (auto it = pixel_format_table_ex.begin(); it != pixel_format_table_ex.end(); it++)
+  {
+    if ((it->second).compare(name_to_find) == 0)
+      return it->first;
+  }
+  return VideoInfo::CS_UNKNOWN;
+}
+
+
+AVSValue PixelType (AVSValue args, void*, IScriptEnvironment*) {
+  return GetPixelTypeName(VI(args[0]).pixel_type);
+}
+
+// AVS+
+AVSValue ColorSpaceNameToPixelType (AVSValue args, void*, IScriptEnvironment*) {
+  return GetPixelTypeFromName(args[0].AsString());
+}
+
+AVSValue Width(AVSValue args, void*, IScriptEnvironment*) { return VI(args[0]).width; }
+AVSValue Height(AVSValue args, void*, IScriptEnvironment*) { return VI(args[0]).height; }
+AVSValue FrameCount(AVSValue args, void*, IScriptEnvironment*) { return VI(args[0]).num_frames; }
+AVSValue FrameRate(AVSValue args, void*, IScriptEnvironment*) { const VideoInfo& vi = VI(args[0]); return (double)vi.fps_numerator / vi.fps_denominator; } // maximise available precision
+AVSValue FrameRateNumerator(AVSValue args, void*, IScriptEnvironment*) { return (int)VI(args[0]).fps_numerator; } // unsigned int truncated to int
+AVSValue FrameRateDenominator(AVSValue args, void*, IScriptEnvironment*) { return (int)VI(args[0]).fps_denominator; } // unsigned int truncated to int
+AVSValue AudioRate(AVSValue args, void*, IScriptEnvironment*) { return VI(args[0]).audio_samples_per_second; }
+AVSValue AudioLength(AVSValue args, void*, IScriptEnvironment*) { return (int)VI(args[0]).num_audio_samples; }  // Truncated to int
+AVSValue AudioLengthLo(AVSValue args, void*, IScriptEnvironment*) { return (int)(VI(args[0]).num_audio_samples % (unsigned)args[1].AsInt(1000000000)); }
+AVSValue AudioLengthHi(AVSValue args, void*, IScriptEnvironment*) { return (int)(VI(args[0]).num_audio_samples / (unsigned)args[1].AsInt(1000000000)); }
 AVSValue AudioLengthS(AVSValue args, void*, IScriptEnvironment* env) { char s[32]; return env->SaveString(_i64toa(VI(args[0]).num_audio_samples, s, 10)); }
-AVSValue AudioLengthF(AVSValue args, void*, IScriptEnvironment* env) { return (float)VI(args[0]).num_audio_samples; } // at least this will give an order of the size
-AVSValue AudioDuration(AVSValue args, void*, IScriptEnvironment* env) {
+AVSValue AudioLengthF(AVSValue args, void*, IScriptEnvironment*) { return (float)VI(args[0]).num_audio_samples; } // at least this will give an order of the size
+AVSValue AudioDuration(AVSValue args, void*, IScriptEnvironment*) {
   const VideoInfo& vi = VI(args[0]);
   return (double)vi.num_audio_samples / vi.audio_samples_per_second;
 }
 
-AVSValue AudioChannels(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).HasAudio() ? VI(args[0]).nchannels : 0; }
-AVSValue AudioBits(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).BytesPerChannelSample()*8; }
-AVSValue IsAudioFloat(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsSampleType(SAMPLE_FLOAT); }
-AVSValue IsAudioInt(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsSampleType(SAMPLE_INT8 | SAMPLE_INT16 | SAMPLE_INT24 | SAMPLE_INT32 ); }
+AVSValue AudioChannels(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).HasAudio() ? VI(args[0]).nchannels : 0; }
+AVSValue AudioBits(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).BytesPerChannelSample()*8; }
+AVSValue IsAudioFloat(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsSampleType(SAMPLE_FLOAT); }
+AVSValue IsAudioInt(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsSampleType(SAMPLE_INT8 | SAMPLE_INT16 | SAMPLE_INT24 | SAMPLE_INT32 ); }
 
-AVSValue IsRGB(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsRGB(); }
-AVSValue IsRGB24(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsRGB24(); }
-AVSValue IsRGB32(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsRGB32(); }
-AVSValue IsYUV(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYUV(); }
-AVSValue IsYUY2(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYUY2(); }
-AVSValue IsY8(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsY8(); }
-AVSValue IsYV12(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYV12(); }
-AVSValue IsYV16(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYV16(); }
-AVSValue IsYV24(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYV24(); }
-AVSValue IsYV411(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYV411(); }
-AVSValue IsPlanar(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsPlanar(); }
-AVSValue IsInterleaved(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsColorSpace(VideoInfo::CS_INTERLEAVED); }
-AVSValue IsFieldBased(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsFieldBased(); }
-AVSValue IsFrameBased(AVSValue args, void*, IScriptEnvironment* env) { return !VI(args[0]).IsFieldBased(); }
-AVSValue GetParity(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsClip()->GetParity(args[1].AsInt(0)); }
+AVSValue IsRGB(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsRGB(); }
+AVSValue IsRGB24(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsRGB24(); }
+AVSValue IsRGB32(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsRGB32(); }
+AVSValue IsYUV(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYUV(); }
+AVSValue IsYUY2(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYUY2(); }
+AVSValue IsY8(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsY8(); }
+AVSValue IsYV12(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYV12(); }
+AVSValue IsYV16(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYV16(); }
+AVSValue IsYV24(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYV24(); }
+AVSValue IsYV411(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYV411(); }
+AVSValue IsPlanar(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsPlanar(); }
+AVSValue IsInterleaved(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsColorSpace(VideoInfo::CS_INTERLEAVED); }
+AVSValue IsFieldBased(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsFieldBased(); }
+AVSValue IsFrameBased(AVSValue args, void*, IScriptEnvironment*) {  return !VI(args[0]).IsFieldBased(); }
+AVSValue GetParity(AVSValue args, void*, IScriptEnvironment*) {  return args[0].AsClip()->GetParity(args[1].AsInt(0)); }
 
-AVSValue HasVideo(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).HasVideo(); }
-AVSValue HasAudio(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).HasAudio(); }
+AVSValue HasVideo(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).HasVideo(); }
+AVSValue HasAudio(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).HasAudio(); }
 
 AVSValue String(AVSValue args, void*, IScriptEnvironment* env)
 {
@@ -946,25 +1392,45 @@ AVSValue String(AVSValue args, void*, IScriptEnvironment* env)
   return "";
 }
 
-AVSValue Hex(AVSValue args, void*, IScriptEnvironment* env) { char s[9]; return env->SaveString(_itoa(args[0].AsInt(), s, 16)); }
+AVSValue Hex(AVSValue args, void*, IScriptEnvironment* env)
+{ 
+  int n = args[0].AsInt();
+  int wid = args[1].AsInt(0); // 0..8 is the minimum width of the returned string
+  wid = (wid<0) ? 0 : (wid > 8) ? 8 : wid;
+  char buf[8 + 1];
+  sprintf_s(buf, "%0*X", wid, n); // uppercase, unlike <=r2580
+  return env->SaveString(buf);
+}
 
-AVSValue IsBool(AVSValue args, void*, IScriptEnvironment* env) { return args[0].IsBool(); }
-AVSValue IsInt(AVSValue args, void*, IScriptEnvironment* env) { return args[0].IsInt(); }
-AVSValue IsFloat(AVSValue args, void*, IScriptEnvironment* env) { return args[0].IsFloat(); }
-AVSValue IsString(AVSValue args, void*, IScriptEnvironment* env) { return args[0].IsString(); }
-AVSValue IsClip(AVSValue args, void*, IScriptEnvironment* env) { return args[0].IsClip(); }
-AVSValue Defined(AVSValue args, void*, IScriptEnvironment* env) { return args[0].Defined(); }
+AVSValue IsBool(AVSValue args, void*, IScriptEnvironment*) {  return args[0].IsBool(); }
+AVSValue IsInt(AVSValue args, void*, IScriptEnvironment*) {  return args[0].IsInt(); }
+AVSValue IsFloat(AVSValue args, void*, IScriptEnvironment*) {  return args[0].IsFloat(); }
+AVSValue IsString(AVSValue args, void*, IScriptEnvironment*) {  return args[0].IsString(); }
+AVSValue IsClip(AVSValue args, void*, IScriptEnvironment*) {  return args[0].IsClip(); }
+AVSValue Defined(AVSValue args, void*, IScriptEnvironment*) {  return args[0].Defined(); }
 
-AVSValue Default(AVSValue args, void*, IScriptEnvironment* env) { return args[0].Defined() ? args[0] : args[1]; }
-AVSValue VersionNumber(AVSValue args, void*, IScriptEnvironment* env) { return AVS_CLASSIC_VERSION; }
-AVSValue VersionString(AVSValue args, void*, IScriptEnvironment* env) { return AVS_FULLVERSION; }
+AVSValue Default(AVSValue args, void*, IScriptEnvironment*) {  return args[0].Defined() ? args[0] : args[1]; }
+AVSValue VersionNumber(AVSValue args, void*, IScriptEnvironment*) {  return AVS_CLASSIC_VERSION; }
+AVSValue VersionString(AVSValue args, void*, IScriptEnvironment*) {  return AVS_FULLVERSION; }
 
-AVSValue Int(AVSValue args, void*, IScriptEnvironment* env) { return int(args[0].AsFloat()); }
-AVSValue Frac(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsFloat() - int64_t(args[0].AsFloat()); }
-AVSValue Float(AVSValue args, void*, IScriptEnvironment* env) { return args[0].AsFloat(); }
+AVSValue Int(AVSValue args, void*, IScriptEnvironment*) {  return int(args[0].AsFloat()); }
+AVSValue Frac(AVSValue args, void*, IScriptEnvironment*) {  return args[0].AsFloat() - int64_t(args[0].AsFloat()); }
+AVSValue Float(AVSValue args, void*, IScriptEnvironment*) {  return args[0].AsFloat(); }
 
-AVSValue Value(AVSValue args, void*, IScriptEnvironment* env) { char *stopstring; return strtod(args[0].AsString(),&stopstring); }
-AVSValue HexValue(AVSValue args, void*, IScriptEnvironment* env) { char *stopstring; return (int)strtoul(args[0].AsString(),&stopstring,16); }
+AVSValue Value(AVSValue args, void*, IScriptEnvironment*) {  char *stopstring; return strtod(args[0].AsString(),&stopstring); }
+AVSValue HexValue(AVSValue args, void*, IScriptEnvironment*)
+{
+  // Added optional pos arg default = 1, start position in string of the HexString, 1 denotes the string beginning.
+  // Will return 0 if error in 'pos' ie if pos is less than 1 or greater than string length.
+  const char *str = args[0].AsString();
+  int pos = args[1].AsInt(1) - 1;
+  int sz = static_cast<int>(strlen(str));
+  if (pos<0 || pos >= sz)
+    return 0;
+  str += pos;
+  char *stopstring;
+  return (int)(strtoul(str, &stopstring, 16));
+}
 
 AVSValue AvsMin(AVSValue args, void*, IScriptEnvironment* env )
 {
@@ -1115,15 +1581,342 @@ AVSValue LogMsg(AVSValue args, void*, IScriptEnvironment* env)
     return AVSValue();
 }
 
-AVSValue IsY(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsY8(); }
-AVSValue Is420(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).Is420(); }
-AVSValue Is422(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).Is422(); }
-AVSValue Is444(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).Is444(); }
-AVSValue IsRGB48(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsRGB48(); }
-AVSValue IsRGB64(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsRGB64(); }
-AVSValue ComponentSize(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).ComponentSize(); }
-AVSValue BitsPerComponent(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).BitsPerComponent(); }
-AVSValue IsYUVA(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsYUVA(); }
-AVSValue IsPlanarRGB(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsPlanarRGB(); }
-AVSValue IsPlanarRGBA(AVSValue args, void*, IScriptEnvironment* env) { return VI(args[0]).IsPlanarRGBA(); }
+AVSValue IsY(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsY(); }
+AVSValue Is420(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).Is420(); }
+AVSValue Is422(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).Is422(); }
+AVSValue Is444(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).Is444(); }
+AVSValue IsRGB48(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsRGB48(); }
+AVSValue IsRGB64(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsRGB64(); }
+AVSValue ComponentSize(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).ComponentSize(); }
+AVSValue BitsPerComponent(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).BitsPerComponent(); }
+AVSValue IsYUVA(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsYUVA(); }
+AVSValue IsPlanarRGB(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsPlanarRGB(); }
+AVSValue IsPlanarRGBA(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsPlanarRGBA(); }
+AVSValue NumComponents(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).NumComponents(); }
+AVSValue HasAlpha(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsPlanarRGBA() || VI(args[0]).IsYUVA() || VI(args[0]).IsRGB32() || VI(args[0]).IsRGB64(); }
+AVSValue IsPackedRGB(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).IsRGB24() || VI(args[0]).IsRGB32() || VI(args[0]).IsRGB48() || VI(args[0]).IsRGB64(); }
+AVSValue IsVideoFloat(AVSValue args, void*, IScriptEnvironment*) {  return VI(args[0]).BitsPerComponent() == 32; }
 
+// helper for GetProcessInfo
+static int ProcessType() {
+#define PROCESS_UNKNOWN  -1
+#define PROCESS_32_ON_32 0
+#define PROCESS_32_ON_64 1
+#define PROCESS_64_ON_64 2
+
+  if constexpr(sizeof(void*) == 8)
+    return PROCESS_64_ON_64;
+  else {
+    // IsWow64Process is not available on all supported versions of Windows.
+    // Use GetModuleHandle to get a handle to the DLL that contains the function
+    // and GetProcAddress to get a pointer to the function if available.
+
+    BOOL bWoW64Process = FALSE;
+    typedef BOOL(WINAPI *LPFN_ISWOW64PROCESS) (HANDLE, PBOOL);
+    LPFN_ISWOW64PROCESS fnIsWow64Process;
+    HMODULE hKernel32 = GetModuleHandle("kernel32.dll");
+    if (hKernel32 == NULL)
+      return PROCESS_UNKNOWN;
+
+    fnIsWow64Process = (LPFN_ISWOW64PROCESS)GetProcAddress(hKernel32, "IsWow64Process");
+    if (fnIsWow64Process != NULL)
+      fnIsWow64Process(GetCurrentProcess(), &bWoW64Process);
+    else
+      return PROCESS_UNKNOWN;
+
+    if (bWoW64Process)
+      return PROCESS_32_ON_64; //WoW64
+
+    return PROCESS_32_ON_32;
+  }
+}
+
+AVSValue GetProcessInfo(AVSValue args, void*, IScriptEnvironment* env) 
+{ 
+  int infoType = args[0].AsInt(0);
+  if (infoType < 0 || infoType > 1)
+    env->ThrowError("GetProcessInfo: type must be 0 or 1");
+  if (infoType == 0) {
+    return sizeof(void *) == 8 ? 64 : 32;
+  }
+  // infoType == 1
+  return ProcessType();
+}
+
+AVSValue StrToUtf8(AVSValue args, void*, IScriptEnvironment* env) {
+  const char *source = args[0].AsString();
+  // in two steps: Ansi -> WideChar -> Utf8
+  auto wsource = AnsiToWideCharACP(source);
+  // wide -> utf8
+  auto source_utf8 = WideCharToUtf8(wsource.get());
+  AVSValue ret = env->SaveString(source_utf8.get());
+  return ret;
+}
+
+AVSValue StrFromUtf8(AVSValue args, void*, IScriptEnvironment* env) {
+  const char *source_utf8 = args[0].AsString();
+  // in two steps: Utf8 -> WideChar -> Ansi
+  auto wsource = Utf8ToWideChar(source_utf8);
+  // wide -> ansi
+  auto source_ansi = WideCharToAnsiACP(wsource.get());
+  AVSValue ret = env->SaveString(source_ansi.get());
+  return ret;
+}
+
+
+AVSValue IsFloatUvZeroBased(AVSValue args, void*, IScriptEnvironment*)
+{
+#ifdef FLOAT_CHROMA_IS_HALF_CENTERED
+  return false;
+#else
+  return true;
+#endif
+}
+
+AVSValue BuildPixelType(AVSValue args, void*, IScriptEnvironment* env)
+{
+  //  { "BuildPixelType", BUILTIN_FUNC_PREFIX, "[family]s[bits]i[chroma]i[compat]b[oldnames]b[sample_clip]c", BuildPixelType }, // 180517-
+  // family: YUV, YUVA, RGB, RGBA, Y
+  // bits: 8, 10, 12, 14, 16, 32
+  // chroma: for YUV(A) 420,422,444,411. Ignored for RGB(A) and Y
+  // compat (default false): returns packed rgb formats for 8/16 bits (RGB default: planar RGB)
+  // oldnames (default false): returns YV12/YV16/YV24 instead of YUV420P8/YUV422P8/YUV444P8
+  // sample_clip: when supported, its format is overridden by specified parameters (e.g. only change bits=10)
+
+  const bool hasTemplate = args[5].Defined();
+
+  if (!args[0].Defined() && !hasTemplate)
+    env->ThrowError("BuildPixelType error: no color space 'family' or template 'sample_clip' specified");
+  if (!args[1].Defined() && !hasTemplate)
+    env->ThrowError("BuildPixelType error: no 'bits' or  template 'sample_clip' specified");
+
+  std::string family;
+  if (!args[0].Defined() && hasTemplate) {
+    // no family parameter: use template
+    VideoInfo const &vi = args[5].AsClip()->GetVideoInfo();
+    if (vi.IsY())
+      family = "Y";
+    else if (vi.IsPlanar()) {
+      if (vi.IsYUV())
+        family = "YUV";
+      else if (vi.IsYUVA())
+        family = "YUVA";
+      else if (vi.IsPlanarRGB())
+        family = "RGB";
+      else if (vi.IsPlanarRGBA())
+        family = "RGBA";
+      else
+        env->ThrowError("BuildPixelType error: invalid sample_clip format");
+    }
+    else if (vi.IsRGB24() || vi.IsRGB48())
+      family = "RGB";
+    else if (vi.IsRGB32() || vi.IsRGB64())
+      family = "RGBA";
+    else
+      env->ThrowError("BuildPixelType error: invalid sample_clip format");
+  }
+  else {
+    family = args[0].AsString();
+    for (auto & c : family) c = toupper(c); // uppercase input string
+  }
+
+  const bool isYUV = family == "YUV";
+  const bool isYUVA = family == "YUVA";
+  const bool isRGB = family == "RGB";
+  const bool isRGBA = family == "RGBA";
+  const bool isY = family == "Y";
+
+  if(!isYUV && !isYUVA && !isRGB && !isRGBA && !isY)
+    env->ThrowError("BuildPixelType error: wrong 'family'.", family.c_str());
+
+  int bits;
+  if (!args[1].Defined() && hasTemplate) {
+    // no bits parameter: get it from template sample_clip
+    bits = args[5].AsClip()->GetVideoInfo().BitsPerComponent();
+  } else {
+    bits = args[1].AsInt();
+  }
+
+  if (bits != 8 && bits != 10 && bits != 12 && bits != 14 && bits != 16 && bits != 32)
+    env->ThrowError("BuildPixelType error: 'bits'=%d is not valid.", bits);
+
+  int chroma;
+
+  if (isYUV || isYUVA) {
+    if (!args[2].Defined() && hasTemplate) {
+      // no chroma parameter: subsampling from template clip
+      VideoInfo const &vi = args[5].AsClip()->GetVideoInfo();
+      const int hs = vi.GetPlaneWidthSubsampling(PLANAR_U);
+      const int vs = vi.GetPlaneHeightSubsampling(PLANAR_U);
+      if (hs == 0 && vs == 0) chroma = 444;
+      else if (hs == 1 && vs == 0) chroma = 422;
+      else if (hs == 1 && vs == 1) chroma = 420;
+      else if (hs == 2 && vs == 0) chroma = 411;
+      else
+        env->ThrowError("BuildPixelType error: sample_clip has invalid chroma subsampling.");
+    }
+    else {
+      chroma = args[2].AsInt(444);
+    }
+  }
+  else {
+    chroma = 444; // n/a
+  }
+  chroma = isYUV || isYUVA ? args[2].AsInt(444) : 444; // only for YUV(A)
+  if(chroma != 444 && chroma != 422 && chroma != 420 && chroma != 411)
+    env->ThrowError("BuildPixelType error: 'chroma' must be 444, 422, 420 or 411.");
+
+  // packed RGB compatibility formats only for RGB(A)
+  const bool compat = isRGB || isRGBA ? args[3].AsBool(false) : false;
+
+  // e.g. return YV12 instead of YUV420P8
+  const bool oldNames = args[4].AsBool(false);
+
+  if(compat && bits != 8 && bits != 16)
+    env->ThrowError("BuildPixelType error: 'compat'=true requires bits=8 or 16 for RGB(A).");
+
+  if(chroma == 411 && bits != 8)
+    env->ThrowError("BuildPixelType error: 411 is supported only for 8 bits.");
+
+  if (compat) {
+    if (isRGB && bits == 8)
+      return "RGB24";
+    if (isRGB && bits == 16)
+      return "RGB48";
+    if (isRGBA && bits == 8)
+      return "RGB32";
+    return "RGB64"; // RGBA, bits==16
+  }
+
+  std::string format;
+
+  if (isYUV || isYUVA || isY)
+    format = family;
+  else if (isRGB)
+    format = "RGBP";
+  else if (isRGBA)
+    format = "RGBAP";
+
+  if (isYUV || isYUVA) {
+    if (chroma == 444)
+      format += "444";
+    else if(chroma == 422)
+      format += "422";
+    else if (chroma == 420)
+      format += "420";
+    else if (chroma == 411)
+      format += "411";
+    
+    format = format + "P";
+  }
+
+  if (bits == 32)
+      format += (isY ? "32" : "S"); // no "YS", only "Y32"
+  else
+    format = format + std::to_string(bits);
+
+  if (oldNames) {
+    if (format == "YUV420" || format == "YUV420P8") format = "YV12";
+    else if (format == "YUV422" || format == "YUV422P8") format = "YV16";
+    else if (format == "YUV444" || format == "YUV444P8") format = "YV24";
+  }
+  
+  // 411 has no alternative naming
+  if (format == "YUV411") format = "YV411";
+
+  return env->SaveString(format.c_str());
+}
+
+AVSValue VarExist(AVSValue args, void*, IScriptEnvironment* env)
+{
+  const char *name = args[0].AsString();
+  int len = (int)strlen(name);
+
+  bool validName = true;
+  // check for a valid identifier name
+  if (*name != '_' && !isalpha(*name))
+    validName = false;
+  else {
+    for (int i = 1; i < len; i++) {
+      const char ch = name[i];
+      if (!(ch == '_' || isalnum(ch))) {
+        validName = false;
+        break;
+      }
+    }
+  }
+
+  if (!validName)
+    env->ThrowError("VarExist: invalid variable name");
+
+  AVSValue result;
+  IScriptEnvironment2 *env2 = static_cast<IScriptEnvironment2*>(env);
+  return (env2->GetVar(name, &result)); // true if exists
+}
+
+
+#ifdef NEW_AVSVALUE
+
+AVSValue ArrayCreate(AVSValue args, void*, IScriptEnvironment* env)
+{
+  // empty array comes as an array with one non-defined element (AVSValue.type=='v')
+  if (args[0].IsArray() && args[0].ArraySize()==1 && !args[0][0].Defined())
+    return AVSValue(nullptr, 0); // special case: zero length array
+  else
+    return args[0];
+}
+
+AVSValue IsArray(AVSValue args, void*, IScriptEnvironment* env) { return args[0].IsArray(); }
+
+AVSValue ArrayGet(AVSValue args, void*, IScriptEnvironment* env)
+{
+  const int size = args[0].ArraySize();
+  if (args[1].IsString()) {
+    // associative search
+    // { {"a", element1}, { "b", element2 }, etc..}
+    const char *tag = args[1].AsString();
+    for (int i = 0; i < size; i++)
+    {
+      AVSValue currentTagValue = args[0][i]; // two elements e.g. { "b", element2 }
+      if(!currentTagValue.IsArray())
+        env->ThrowError("Array must contain array[string, any] for lookup");
+      if(currentTagValue.ArraySize() < 2)
+        env->ThrowError("Internal array must have at least two elements (tag, value)");
+      AVSValue currentTag = currentTagValue[0];
+      if (currentTag.IsString() && !lstrcmpi(currentTag.AsString(), tag))
+      {
+        return currentTagValue[1];
+      }
+    }
+    return AVSValue(); // undefined
+  }
+  else if (args[1].IsArray()) {
+    AVSValue indexes = args[1];
+    AVSValue currentValue = args[0];
+    int index_count = indexes.ArraySize(); // array of parameters. a[1,2] -> [1,2]
+    if(index_count == 0)
+      env->ThrowError("ArrayGet: no index specified");
+    for (int i = 0; i < index_count; i++)
+    {
+      if(!indexes[i].IsInt())
+        env->ThrowError("Invalid compound array index: must be integer");
+      if(!currentValue.IsArray())
+        env->ThrowError("ArrayGet: not an array. Problematic index count: %d", i+1);
+      int currentIndex = indexes[i].AsInt();
+      if(currentIndex < 0 || currentIndex >= currentValue.ArraySize())
+        env->ThrowError("Array index out of range. Problematic index count: %d", i+1);
+      currentValue = currentValue[currentIndex];
+    }
+    return currentValue;
+  }
+  env->ThrowError("Invalid array index, must be integer or string, or comma separated integers");
+  return AVSValue(); // undefined
+}
+
+AVSValue ArraySize(AVSValue args, void*, IScriptEnvironment* env)
+{
+  if (!args[0].IsArray())
+    env->ThrowError("Parameter must be array");
+  return args[0].ArraySize();
+}
+#endif

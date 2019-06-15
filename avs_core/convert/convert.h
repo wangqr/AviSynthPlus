@@ -37,7 +37,7 @@
 
 #include "../core/internal.h"
 
-enum {Rec601=0, Rec709=1, PC_601=2, PC_709=3, AVERAGE=4 };
+enum {Rec601=0, Rec709=1, PC_601=2, PC_709=3, AVERAGE=4, Rec2020=5 };
 int getMatrix( const char* matrix, IScriptEnvironment* env);
 
 /*****************************************************
@@ -66,7 +66,7 @@ inline int RGB2YUV(int rgb)
  *******   Colorspace GenericVideoFilter Classes   ******
  *******************************************************/
 
-
+// YUY2 only
 class ConvertToRGB : public GenericVideoFilter 
 /**
   * Class to handle conversion to RGB & RGBA
@@ -77,18 +77,18 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
   
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
-  static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);  
-  static AVSValue __cdecl Create32(AVSValue args, void*, IScriptEnvironment* env);
-  static AVSValue __cdecl Create24(AVSValue args, void*, IScriptEnvironment* env);
+  static AVSValue __cdecl Create(AVSValue args, void* user_data, IScriptEnvironment* env);
 
 private:
   int theMatrix;
-  enum {Rec601=0, Rec709=1, PC_601=2, PC_709=3 };	
+  enum {Rec601=0, Rec709=1, PC_601=2, PC_709=3};
 };
 
+// YUY2 only
 class ConvertToYV12 : public GenericVideoFilter 
 /**
   * Class for conversions to YV12
@@ -99,6 +99,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 

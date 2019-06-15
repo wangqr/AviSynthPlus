@@ -168,7 +168,7 @@ int __stdcall Prefetcher::SchedulePrefetch(int current_n, int prefetch_start, In
 
     PVideoFrame result;
     LruCache<size_t, PVideoFrame>::handle cache_handle;
-    switch(_pimpl->VideoCache->lookup(n, &cache_handle, false))
+    switch(_pimpl->VideoCache->lookup(n, &cache_handle, false, result))
     {
     case LRU_LOOKUP_NOT_FOUND:
       {
@@ -281,7 +281,8 @@ PVideoFrame __stdcall Prefetcher::GetFrame(int n, IScriptEnvironment* env)
   // Get requested frame
   PVideoFrame result;
   LruCache<size_t, PVideoFrame>::handle cache_handle;
-  switch(_pimpl->VideoCache->lookup(n, &cache_handle, true))
+  // fill result if LRU_LOOKUP_FOUND_AND_READY
+  switch(_pimpl->VideoCache->lookup(n, &cache_handle, true, result))
   {
   case LRU_LOOKUP_NOT_FOUND:
     {
@@ -304,8 +305,8 @@ PVideoFrame __stdcall Prefetcher::GetFrame(int n, IScriptEnvironment* env)
     }
   case LRU_LOOKUP_FOUND_AND_READY:
     {
-      result = cache_handle.first->value;
-      break;
+    //result = cache_handle.first->value; // old method, result is filled already
+    break;
     }
   case LRU_LOOKUP_NO_CACHE:
     {
@@ -338,6 +339,7 @@ void __stdcall Prefetcher::GetAudio(void* buf, __int64 start, __int64 count, ISc
 
 int __stdcall Prefetcher::SetCacheHints(int cachehints, int frame_range)
 {
+  AVS_UNUSED(frame_range);
   if (CACHE_GET_MTMODE == cachehints)
     return MT_NICE_FILTER;
 

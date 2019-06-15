@@ -156,12 +156,17 @@ iscomment(char *string)
 // Reader ------------------------------------------------
 
 
-ConditionalReader::ConditionalReader(PClip _child, const char* filename, const char _varname[], bool _show, IScriptEnvironment* env)
- : GenericVideoFilter(_child), show(_show), variableName(_varname), mode(MODE_UNKNOWN), offset(0), stringcache(0)
+ConditionalReader::ConditionalReader(PClip _child, const char* filename, const char _varname[], bool _show, const char *_condVarSuffix, IScriptEnvironment* env)
+ : GenericVideoFilter(_child), show(_show), mode(MODE_UNKNOWN), offset(0), stringcache(0)
 {
   FILE * f;
   char *line = 0;
   int lines;
+
+  variableName = _varname; // std::string
+  if (_condVarSuffix[0])
+    variableName += _condVarSuffix; // append if parameter exists
+  variableNameFixed = env->SaveString(variableName.c_str());
 
   if ((f = fopen(filename, "rb")) == NULL)
     env->ThrowError("ConditionalReader: Could not open file '%s'.", filename);
@@ -410,19 +415,19 @@ void ConditionalReader::SetRange(int start_frame, int stop_frame, AVSValue v) {
 
   switch (mode) {
     case MODE_INT:
-      p = v.AsInt();
+      p = v.Defined() ? v.AsInt() : 0;
       for (i = start_frame; i <= stop_frame; i++) {
         intVal[i] = p;
       }
       break;
     case MODE_FLOAT:
-      q = v.AsFloatf();
+      q = v.Defined() ? v.AsFloatf() : 0.0f;
       for (i = start_frame; i <= stop_frame; i++) {
         floatVal[i] = q;
       }
       break;
     case MODE_BOOL:
-      r = v.AsBool();
+      r = v.Defined() ? v.AsBool() : false;
       for (i = start_frame; i <= stop_frame; i++) {
         boolVal[i] = r;
       }
@@ -525,7 +530,7 @@ void ConditionalReader::ThrowLine(const char* err, int line, IScriptEnvironment*
 PVideoFrame __stdcall ConditionalReader::GetFrame(int n, IScriptEnvironment* env)
 {
   AVSValue v = GetFrameValue(n);
-  env->SetGlobalVar(variableName, v);
+  env->SetGlobalVar(variableNameFixed, v);
 
   PVideoFrame src = child->GetFrame(n,env);
 
@@ -542,7 +547,7 @@ PVideoFrame __stdcall ConditionalReader::GetFrame(int n, IScriptEnvironment* env
 
 AVSValue __cdecl ConditionalReader::Create(AVSValue args, void*, IScriptEnvironment* env)
 {
-  return new ConditionalReader(args[0].AsClip(), args[1].AsString(""), args[2].AsString("Conditional") , args[3].AsBool(false), env);
+  return new ConditionalReader(args[0].AsClip(), args[1].AsString(""), args[2].AsString("Conditional") , args[3].AsBool(false), args[4].AsString(""), env);
 }
 
 

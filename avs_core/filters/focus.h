@@ -37,6 +37,10 @@
 
 #include <avisynth.h>
 
+template<bool packedRGB3264>
+int calculate_sad_sse2(const BYTE* cur_ptr, const BYTE* other_ptr, int cur_pitch, int other_pitch, size_t rowsize, size_t height);
+template<typename pixel_t, bool packedRGB3264>
+__int64 calculate_sad_8_or_16_sse2(const BYTE* cur_ptr, const BYTE* other_ptr, int cur_pitch, int other_pitch, size_t rowsize, size_t height);
 
 class AdjustFocusV : public GenericVideoFilter 
 /**
@@ -48,6 +52,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -67,6 +72,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -92,14 +98,19 @@ public:
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
 private:
-// YV12:
-    int planes[8];
+    typedef struct {
+      int planeId;
+      int threshold;
+    } planeInfo;
+    planeInfo planes[4];
     int scenechange;
     int pixelsize;
+    int bits_per_pixel;
 
 // YUY2:
   const unsigned luma_threshold, chroma_threshold;
@@ -121,6 +132,7 @@ public:
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -129,6 +141,12 @@ private:
   const int diameter;
 
 };
+
+// in focus_avx2.cpp
+void af_horizontal_planar_uint16_t_avx2(BYTE* dstp, size_t height, size_t pitch, size_t row_size, size_t amount, int bits_per_pixel);
+void af_horizontal_planar_avx2(BYTE* dstp, size_t height, size_t pitch, size_t width, size_t amount);
+void af_vertical_avx2(BYTE* line_buf, BYTE* dstp, int height, int pitch, int width, int amount);
+void af_vertical_uint16_t_avx2(BYTE* line_buf, BYTE* dstp, int height, int pitch, int row_size, int amount);
 
 
 #endif  // __Focus_H__

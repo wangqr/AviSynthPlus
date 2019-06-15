@@ -362,6 +362,12 @@ CmpCustomizePluginPaths=Customize Plugin Paths
 FileTypeDescAvs=%1 Script
 FileTypeDescAvsi=%1 Autoload Script
 
+SelectAssoc=Select Association
+SelectAssocNotepadOpen=Associate AVS and AVSI with Notepad (open)
+SelectAssocAddShellNew=Add Avisynth Script to New items menu
+SelectAssocMplayer=Associate AVS with Windows Media Player 6.4 (play)
+SelectAssocWMplayer=Associate AVS with Windows Media Player (play)
+
 InstallStatusRuntime = Installing %1 (%2).%nThis may take up to 5 minutes... 
 UninstallStatusLegacyRestore = Restoring legacy AviSynth...
 BackupRestoreFailed=An error occured while trying to restore your previous AviSynth installation:%n%1

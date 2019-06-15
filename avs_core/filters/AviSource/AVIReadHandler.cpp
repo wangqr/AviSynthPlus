@@ -23,12 +23,12 @@
 //#include "ProgressDialog.h"
 #include "AVIIndex.h"
 #include "Error.h"
-#include "List.h"
+#include "list.h"
 #include "Fixes.h"
 #include "File64.h"
 
 #include "clip_info.h"
-
+#include "../core/internal.h"
 #include <cmath>
 #include <cstdint>
 
@@ -329,7 +329,7 @@ class AVIReadHandler : public IAVIReadHandler, private File64 {
 public:
 	bool		fDisableFastIO;
 
-	AVIReadHandler(const char *);
+	AVIReadHandler(const wchar_t *);
 	AVIReadHandler(PAVIFILE);
 	~AVIReadHandler();
 
@@ -340,7 +340,7 @@ public:
 	bool isOptimizedForRealtime();
 	bool isStreaming();
 	bool isIndexFabricated();
-	bool AppendFile(const char *pszFile);
+	bool AppendFile(const wchar_t *pszFile);
 	bool getSegmentHint(const char **ppszPath);
 
 	void EnableStreaming(int stream);
@@ -380,7 +380,7 @@ private:
 	List2<AVIStreamNode>		listStreams;
 	List2<AVIFileDesc>			listFiles;
 
-	void		_construct(const char *pszFile);
+	void		_construct(const wchar_t *pszFile_w);
 	void		_parseFile(List2<AVIStreamNode>& streams);
 	bool		_parseStreamHeader(List2<AVIStreamNode>& streams, DWORD dwLengthLeft, bool& bIndexDamaged);
 	bool		_parseIndexBlock(List2<AVIStreamNode>& streams, int count, __int64);
@@ -396,8 +396,8 @@ IAVIReadHandler *CreateAVIReadHandler(PAVIFILE paf) {
 	return new AVIReadHandler(paf);
 }
 
-IAVIReadHandler *CreateAVIReadHandler(const char *pszFile) {
-	return new AVIReadHandler(pszFile);
+IAVIReadHandler *CreateAVIReadHandler(const wchar_t *pszFile_w) {
+	return new AVIReadHandler(pszFile_w);
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -969,7 +969,7 @@ HRESULT AVIReadStream::Read(long lStart, long lSamples, void *lpBuffer, long cbB
 
 						if (!parent->isStreaming() || streamptr<0 || (fptrdiff<4194304 && fptrdiff>-4194304)) {
 							if (!psnData->cache)
-								psnData->cache = new AVIReadCache(psnData->hdr.fccType == 'sdiv' ? 131072 : 16384, streamno, parent, psnData);
+								psnData->cache = new AVIReadCache(psnData->hdr.fccType == MAKEFOURCC('v','i','d','s') ? 131072 : 16384, streamno, parent, psnData);
 							else
 								psnData->cache->ResetStatistics();
 
@@ -1069,7 +1069,7 @@ HRESULT AVIReadStream::Read(long lStart, long lSamples, void *lpBuffer, long cbB
 
 						if (!parent->isStreaming() || streamptr<0 || (fptrdiff<4194304 && fptrdiff>-4194304)) {
 							if (!psnData->cache)
-								psnData->cache = new AVIReadCache(psnData->hdr.fccType == 'sdiv' ? 131072 : 16384, streamno, parent, psnData);
+								psnData->cache = new AVIReadCache(psnData->hdr.fccType == MAKEFOURCC('v','i','d','s') ? 131072 : 16384, streamno, parent, psnData);
 							else
 								psnData->cache->ResetStatistics();
 
@@ -1252,7 +1252,7 @@ bool AVIReadStream::getVBRInfo(double& bitrate_mean, double& bitrate_stddev, dou
 
 ///////////////////////////////////////////////////////////////////////////
 
-AVIReadHandler::AVIReadHandler(const char *s)
+AVIReadHandler::AVIReadHandler(const wchar_t *s)
 : pAvisynthClipInfo(0)
 , bAggressivelyRecovered(false)
 {
@@ -1312,20 +1312,20 @@ AVIReadHandler::~AVIReadHandler() {
 	_destruct();
 }
 
-void AVIReadHandler::_construct(const char *pszFile) {
+void AVIReadHandler::_construct(const wchar_t *pszFile_w) {
 
 	try {
 		AVIFileDesc *pDesc;
 
 		// open file
 
-		hFile = CreateFile(pszFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+		hFile = CreateFileW(pszFile_w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
 
 		if (INVALID_HANDLE_VALUE == hFile)
-			throw MyWin32Error("Couldn't open %s: %%s", GetLastError(), pszFile);
+			throw MyWin32Error("Couldn't open %s: %%s", GetLastError(), WideCharToAnsi(pszFile_w).get());
 
-		hFileUnbuffered = CreateFile(
-				pszFile,
+		hFileUnbuffered = CreateFileW(
+				pszFile_w,
 				GENERIC_READ,
 				FILE_SHARE_READ,
 				NULL,
@@ -1357,7 +1357,7 @@ void AVIReadHandler::_construct(const char *pszFile) {
 	}
 }
 
-bool AVIReadHandler::AppendFile(const char *pszFile) {
+bool AVIReadHandler::AppendFile(const wchar_t *pszFile_w) {
 	List2<AVIStreamNode> newstreams;
 	AVIStreamNode *pasn_old, *pasn_new, *pasn_old_next=NULL, *pasn_new_next=NULL;
 	AVIFileDesc *pDesc;
@@ -1366,13 +1366,13 @@ bool AVIReadHandler::AppendFile(const char *pszFile) {
 
 	// open file
 
-	hFile = CreateFile(pszFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+	hFile = CreateFileW(pszFile_w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
 
 	if (INVALID_HANDLE_VALUE == hFile)
-		throw MyWin32Error("Couldn't open %s: %%s", GetLastError(), pszFile);
+		throw MyWin32Error("Couldn't open %s: %%s", GetLastError(), WideCharToAnsi(pszFile_w).get());
 
-	hFileUnbuffered = CreateFile(
-			pszFile,
+	hFileUnbuffered = CreateFileW(
+			pszFile_w,
 			GENERIC_READ,
 			FILE_SHARE_READ,
 			NULL,
@@ -1393,7 +1393,7 @@ bool AVIReadHandler::AppendFile(const char *pszFile) {
 			switch(pasn_old->hdr.fccType) {
 			case streamtypeAUDIO:	szPrefix = "Cannot append segment: The audio streams "; break;
 			case streamtypeVIDEO:	szPrefix = "Cannot append segment: The video streams "; break;
-			case 'savi':			szPrefix = "Cannot append segment: The DV streams "; break;
+			case MAKEFOURCC('i', 'v', 'a', 's'):			szPrefix = "Cannot append segment: The DV streams "; break;
 			default:				szPrefix = ""; break;
 			}
 
@@ -1450,7 +1450,7 @@ bool AVIReadHandler::AppendFile(const char *pszFile) {
 		pDesc->hFileUnbuffered	= hFileUnbuffered;
 		pDesc->i64Size			= _sizeFile();
 	} catch(const AvisynthError&) {
-		while(pasn_new = newstreams.RemoveHead())
+		while((pasn_new = newstreams.RemoveHead()))
 			delete pasn_new;
 
 		CloseHandle(hFile);
@@ -1464,7 +1464,7 @@ bool AVIReadHandler::AppendFile(const char *pszFile) {
 
 	pasn_old = listStreams.AtHead();
 
-	while(pasn_old_next = pasn_old->NextFromHead()) {
+	while((pasn_old_next = pasn_old->NextFromHead())) {
 		pasn_new = newstreams.RemoveHead();
 
 		// Fix up header.
@@ -1507,7 +1507,7 @@ bool AVIReadHandler::AppendFile(const char *pszFile) {
 		AVIReadStream *pStream, *pStreamNext;
 
 		pStream = pasn_old->listHandlers.AtHead();
-		while(pStreamNext = pStream->NextFromHead()) {
+		while((pStreamNext = pStream->NextFromHead())) {
 			pStream->Reinit();
 
 			pStream = pStreamNext;
@@ -1548,7 +1548,7 @@ void AVIReadHandler::_parseFile(List2<AVIStreamNode>& streamlist) {
 
 	_readFile2(&fccType, 4);
 
-	if (fccType != ' IVA')
+	if (fccType != MAKEFOURCC('A', 'V', 'I', ' '))
 		throw MyError("Invalid AVI file: RIFF type is not 'AVI'");
 
 	// Aggressive mode recovery does extensive validation and searching to attempt to
@@ -1589,7 +1589,7 @@ void AVIReadHandler::_parseFile(List2<AVIStreamNode>& streamlist) {
 //			_RPT1(0,"\tList type '%-4s'\n", &fccType);
 
 			switch(fccType) {
-			case 'ivom':
+      case MAKEFOURCC('m','o','v','i'):
 
 				if (dwLength < 8) {
 					i64ChunkMoviPos = _posFile();
@@ -1630,7 +1630,7 @@ void AVIReadHandler::_parseFile(List2<AVIStreamNode>& streamlist) {
 		case ckidAVIPADDING:	// JUNK
 			break;
 
-		case 'mges':			// VirtualDub segment hint block
+		case MAKEFOURCC('s', 'e', 'g', 'm'):			// VirtualDub segment hint block
 			delete [] pSegmentHint;
 			if (!(pSegmentHint = new(std::nothrow) char[dwLength]))
 				throw MyMemoryError();
@@ -1670,7 +1670,7 @@ terminate_scan:
 
 		pasn = streamlist.AtHead();
 
-		while(pasn_next = pasn->NextFromHead()) {
+		while((pasn_next = pasn->NextFromHead())) {
 			pasn->index.clear();
 			pasn = pasn_next;
 		}
@@ -1764,13 +1764,13 @@ terminate_scan:
 			// LIST chunks of type 'movi'.
 
 			if (dwLength) {
-				if (fccType == 'FFIR' || fccType == 'TSIL') {
+				if (fccType == MAKEFOURCC('R','I','F','F') || fccType == MAKEFOURCC('L','I','S','T')) {
 					FOURCC fccType2;
 
 					if (!_readFile(&fccType2, 4))
 						break;
 
-					if (fccType2 != 'XIVA' && fccType2 != 'ivom') {
+					if (fccType2 != MAKEFOURCC('A','V','I','X') && fccType2 != MAKEFOURCC('m','o','v','i')) {
 						if (!_skipFile2(dwLength + (dwLength&1) - 4))
 							break;
 					}
@@ -1814,7 +1814,7 @@ terminate_scan:
 
 	pasn = streamlist.AtHead();
 
-	while(pasn_next = pasn->NextFromHead()) {
+	while((pasn_next = pasn->NextFromHead())) {
 		if (!pasn->index.makeIndex2())
 			throw MyMemoryError();
 
@@ -1903,26 +1903,26 @@ bool AVIReadHandler::_parseStreamHeader(List2<AVIStreamNode>& streamlist, DWORD 
 				if (pasn->hdr.fccType == streamtypeVIDEO) {
 					switch(((BITMAPINFOHEADER *)pasn->pFormat)->biCompression) {
 						case NULL:
-						case ' WAR':
-						case ' BID':
-						case '1bmd':
-						case 'gpjm':
-						case 'GPJM':
-						case 'YUYV':
-						case '2YUY':
-						case 'YVYU':
-						case 'UYVY':
-						case '21VY':
-						case '61VY':
-						case '42VY':
-						case 'B14Y':
-						case '008Y':
-						case '  8Y':
-						case '024I':
-						case 'P14Y':
-						case 'vuyc':
-						case 'UYFH':
-						case '02tb':
+						case MAKEFOURCC('R', 'A', 'W', ' '): // ' WAR'
+						case MAKEFOURCC('D', 'I', 'B', ' '): // ' BID'
+            case MAKEFOURCC('d', 'm', 'b', '1'): // '1bmd'
+            case MAKEFOURCC('m', 'j', 'p', 'g'): // 'gpjm'
+            case MAKEFOURCC('M', 'J', 'P', 'G'): // 'GPJM'
+            case MAKEFOURCC('V', 'Y', 'U', 'Y'): // 'YUYV'
+            case MAKEFOURCC('Y', 'U', 'Y', '2'): // '2YUY'
+            case MAKEFOURCC('U', 'Y', 'V', 'Y'): // 'YVYU'
+            case MAKEFOURCC('Y', 'V', 'Y', 'U'): // 'UYVY'
+            case MAKEFOURCC('Y', 'V', '1', '2'): // '21VY'
+            case MAKEFOURCC('Y', 'V', '1', '6'): // '61VY'
+            case MAKEFOURCC('Y', 'V', '2', '4'): // '42VY'
+            case MAKEFOURCC('Y', '4', '1', 'B'): // 'B14Y'
+            case MAKEFOURCC('Y', '8', '0', '0'): // '008Y'
+            case MAKEFOURCC('Y', '8', ' ', ' '): // '  8Y'
+            case MAKEFOURCC('I', '4', '2', '0'): // '024I'
+            case MAKEFOURCC('Y', '4', '1', 'P'): // 'P14Y'
+            case MAKEFOURCC('c', 'y', 'u', 'v'): // 'vuyc'
+            case MAKEFOURCC('H', 'F', 'Y', 'U'): // 'UYFH'
+            case MAKEFOURCC('b', 't', '2', '0'): // '02tb'
 							pasn->keyframe_only = true;
 					}
 				}
@@ -1932,7 +1932,7 @@ bool AVIReadHandler::_parseStreamHeader(List2<AVIStreamNode>& streamlist, DWORD 
 				dwLength = 0;
 				break;
 
-			case 'xdni':			// OpenDML extended index
+			case MAKEFOURCC('i', 'n', 'd', 'x'):			// OpenDML extended index
 				{
 					__int64 posFileSave = _posFile();
 
@@ -1992,7 +1992,7 @@ bool AVIReadHandler::_parseIndexBlock(List2<AVIStreamNode>& streamlist, int coun
 		if (tc*int(sizeof(AVIINDEXENTRY)) != _readFile(avie, tc*sizeof(AVIINDEXENTRY))) {
 			pasn = streamlist.AtHead();
 
-			while(pasn_next = pasn->NextFromHead()) {
+			while((pasn_next = pasn->NextFromHead())) {
 				pasn->index.clear();
 				pasn->bytes = 0;
 
@@ -2142,7 +2142,7 @@ void AVIReadHandler::_destruct() {
 	if (paf)
 		AVIFileRelease(paf);
 
-	while(pasn = listStreams.RemoveTail())
+	while((pasn = listStreams.RemoveTail()))
 		delete pasn;
 
 	delete streamBuffer;
@@ -2153,7 +2153,7 @@ void AVIReadHandler::_destruct() {
 		if (hFileUnbuffered != INVALID_HANDLE_VALUE)
 			CloseHandle(hFileUnbuffered);
 	} else
-		while(pDesc = listFiles.RemoveTail()) {
+		while((pDesc = listFiles.RemoveTail())) {
 			CloseHandle(pDesc->hFile);
 			CloseHandle(pDesc->hFileUnbuffered);
 			delete pDesc;
@@ -2190,7 +2190,7 @@ IAVIReadStream *AVIReadHandler::GetStream(DWORD fccType, LONG lParam) {
 
 		pasn = listStreams.AtHead();
 
-		while(pasn_next = pasn->NextFromHead()) {
+		while((pasn_next = pasn->NextFromHead())) {
 			if (pasn->hdr.fccType == fccType && !lParam--)
 				break;
 
@@ -2378,7 +2378,7 @@ bool AVIReadHandler::Stream(AVIStreamNode *pusher, __int64 pos) {
 
 			pasn = listStreams.AtHead();
 
-			while(pasn_next = pasn->NextFromHead()) {
+			while((pasn_next = pasn->NextFromHead())) {
 				if (streamno == stream) {
 					long left = hdr[1] + (hdr[1]&1);
 					bool fWrite = pasn->cache->WriteBegin(i64StreamPosition + sbPosition, left);
@@ -2474,7 +2474,7 @@ void AVIReadHandler::FixCacheProblems(AVIReadStream *arse) {
 
 	pasn = listStreams.AtHead();
 
-	while(pasn_next = pasn->NextFromHead()) {
+	while((pasn_next = pasn->NextFromHead())) {
 		if (pasn->cache)
 			if (!stream_leader || pasn->stream_pushes > stream_leader->stream_pushes) {
 				stream_leader = pasn;
@@ -2514,7 +2514,7 @@ void AVIReadHandler::FixCacheProblems(AVIReadStream *arse) {
 
 	pasn = listStreams.AtHead();
 
-	while(pasn_next = pasn->NextFromHead()) {
+	while((pasn_next = pasn->NextFromHead())) {
 		if (pasn->cache)
 			pasn->cache->ResetStatistics();
 

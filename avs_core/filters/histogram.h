@@ -35,7 +35,8 @@
 #define __Histogram_H__
 
 #include <avisynth.h>
-
+#include <vector>
+#include "stdint.h"
 
 /********************************************************************
 ********************************************************************/
@@ -59,7 +60,7 @@ public:
 	ModeAudioLevels
   };
 
-  Histogram(PClip _child, Mode _mode, AVSValue _option, IScriptEnvironment* env);
+  Histogram(PClip _child, Mode _mode, AVSValue _option, int _show_bits, bool _keepsource, bool _markers, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
   PVideoFrame DrawModeClassic    (int n, IScriptEnvironment* env);
   PVideoFrame DrawModeLevels     (int n, IScriptEnvironment* env);
@@ -80,6 +81,17 @@ private:
   int deg15c[24], deg15s[24];
   PClip aud_clip;
   AVSValue option;
+  int pixelsize;
+  int bits_per_pixel;
+  int show_bits; // e.g. levels for 10 bits
+  bool keepsource; // return only the Histogram drawing
+  bool markers; // paint hazardous YUV area
+  int origwidth;
+  int origheight;
+
+  int E167;
+  std::vector<uint16_t> exptab;
+  void ClassicLUTInit();
 };
 
 

@@ -40,11 +40,22 @@
 #include <avisynth.h>
 #include <stdint.h>
 
+// useful functions
+template <typename pixel_t>
+void fill_chroma(uint8_t * dstp_u, uint8_t * dstp_v, int height, int pitch, pixel_t val);
+
+template <typename pixel_t>
+void fill_plane(uint8_t * dstp, int height, int pitch, pixel_t val);
+
 struct ChannelConversionMatrix {
-  int16_t r;
+  int16_t r;    // for 15bit scaled integer arithmetic
   int16_t g;
   int16_t b;
-  int offset_y;
+  float r_f;    // for float operation
+  float g_f;
+  float b_f;
+  int offset_y; // always 8 bit
+  float offset_y_f; // for float
 };
 
 class ConvertToY8 : public GenericVideoFilter
@@ -54,6 +65,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n,IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -61,8 +73,10 @@ public:
 private:
   bool blit_luma_only;
   bool yuy2_input;
-  bool rgb_input;
+  bool packed_rgb_input;
+  bool planar_rgb_input;
   int pixel_step;
+  int pixelsize;
   ChannelConversionMatrix matrix;
 };
 
@@ -77,24 +91,38 @@ struct ConversionMatrix {
   int16_t v_g;
   int16_t v_b;
 
+  float y_r_f;
+  float y_g_f;
+  float y_b_f;
+  float u_r_f;
+  float u_g_f;
+  float u_b_f;
+  float v_r_f;
+  float v_g_f;
+  float v_b_f;
+
   int offset_y;
+  float offset_y_f;
 };
 
-class ConvertRGBToYV24 : public GenericVideoFilter
+class ConvertRGBToYUV444 : public GenericVideoFilter
 {
 public:
-  ConvertRGBToYV24(PClip src, int matrix, IScriptEnvironment* env);
+  ConvertRGBToYUV444(PClip src, int matrix, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 private:
-  void BuildMatrix(double Kr, double Kb, int Sy, int Suv, int Oy, int shift);
+  void BuildMatrix(double Kr, double Kb, int shift, bool full_scale, int bits_per_pixel);
   ConversionMatrix matrix;
   int pixel_step;
+  bool hasAlpha;
+  bool isPlanarRGBfamily;
 };
 
 class ConvertYUY2ToYV16 : public GenericVideoFilter
@@ -104,26 +132,29 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 };
 
-class ConvertYV24ToRGB : public GenericVideoFilter
+// note for AVS16: renamed from ConvertYV24ToRGB (Convert444ToRGB is already used in Overlay)
+class ConvertYUV444ToRGB : public GenericVideoFilter
 {
 public:
-  ConvertYV24ToRGB(PClip src, int matrix, int pixel_step, IScriptEnvironment* env);
+  ConvertYUV444ToRGB(PClip src, int matrix, int pixel_step, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
-  static AVSValue __cdecl Create24(AVSValue args, void*, IScriptEnvironment* env);
-  static AVSValue __cdecl Create32(AVSValue args, void*, IScriptEnvironment* env);
+//  static AVSValue __cdecl Create24(AVSValue args, void*, IScriptEnvironment* env);
+//  static AVSValue __cdecl Create32(AVSValue args, void*, IScriptEnvironment* env);
 private:
-  void BuildMatrix(double Kr, double Kb, int Sy, int Suv, int Oy, int shift);
+  void BuildMatrix(double Kr, double Kb, int shift, bool full_scale, int bits_per_pixel);
   ConversionMatrix matrix;
   int pixel_step;
 };
@@ -135,6 +166,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -151,6 +183,7 @@ public:
   PVideoFrame __stdcall GetFrame(int n, IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
@@ -170,65 +203,69 @@ private:
 
 //--------------- planar bit depth conversions
 // todo: separate file?
-typedef void (*BitDepthConvFuncPtr)(const BYTE *srcp, BYTE *dstp, int src_rowsize, int src_height, int src_pitch, int dst_pitch, float float_range);
+typedef void (*BitDepthConvFuncPtr)(const BYTE *srcp, BYTE *dstp, int src_rowsize, int src_height, int src_pitch, int dst_pitch);
 
-class ConvertTo8bit : public GenericVideoFilter
+class ConvertBits : public GenericVideoFilter
 {
 public:
-  ConvertTo8bit(PClip _child, const float _float_range, const int _dither_mode, IScriptEnvironment* env);
+  ConvertBits(PClip _child, const int _dither_mode, const int _target_bitdepth, bool _truerange, bool _fulls, bool _fulld, int _dither_bitdepth, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n,IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
   static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);  
 private:
   BitDepthConvFuncPtr conv_function;
+  BitDepthConvFuncPtr conv_function_chroma; // 32bit float YUV chroma
+  BitDepthConvFuncPtr conv_function_a;
   float float_range;
   int dither_mode;
   int pixelsize;
+  int bits_per_pixel;
+  int target_bitdepth;
+  int dither_bitdepth;
+  bool truerange; // if 16->10 range reducing or e.g. 14->16 bit range expansion needed
+  bool format_change_only;
+  bool fulls; // source is full range (defaults: rgb=true, yuv=false (bit shift))
+  bool fulld; // destination is full range (defaults: rgb=true, yuv=false (bit shift))
 };
 
-class ConvertTo16bit : public GenericVideoFilter
+class AddAlphaPlane : public GenericVideoFilter
 {
 public:
-  ConvertTo16bit(PClip _child, const float _float_range, const int _dither_mode, const int _bitdepth, bool _modify_range, IScriptEnvironment* env);
+  AddAlphaPlane(PClip _child, PClip _maskClip, float _mask_f, bool isMaskDefined, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n,IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
-  static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);  
+  static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 private:
-  BitDepthConvFuncPtr conv_function;
-  float float_range;
-  int dither_mode;
+  int mask;
+  float mask_f;
+  PClip alphaClip;
   int pixelsize;
-  int bitdepth; // effective 10/12/14/16 bits within the 2 byte container
-  bool modify_range; // if 16->10 range reducing or e.g. 14->16 bit range expansion needed
-  bool change_only_format; // if 16->10 bit affects only pixel_type
+  int bits_per_pixel;
 };
 
-class ConvertToFloat : public GenericVideoFilter
+class RemoveAlphaPlane : public GenericVideoFilter
 {
 public:
-  ConvertToFloat(PClip _child, const float _float_range, const int _dither_mode, IScriptEnvironment* env);
+  RemoveAlphaPlane(PClip _child, IScriptEnvironment* env);
   PVideoFrame __stdcall GetFrame(int n,IScriptEnvironment* env);
 
   int __stdcall SetCacheHints(int cachehints, int frame_range) override {
+    AVS_UNUSED(frame_range);
     return cachehints == CACHE_GET_MTMODE ? MT_NICE_FILTER : 0;
   }
 
-  static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);  
+  static AVSValue __cdecl Create(AVSValue args, void*, IScriptEnvironment* env);
 private:
-  BitDepthConvFuncPtr conv_function;
-  float float_range;
-  int dither_mode;
-  int pixelsize;
 };
-
-
 
 #endif

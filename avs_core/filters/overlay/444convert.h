@@ -38,102 +38,14 @@
 #define __444Convert_h
 
 #include <avisynth.h>
-#include "imghelpers.h"
 
-class ConvertTo444 {
-  private:
-    VideoInfo* inputVi;    
-
-  public:
-    ConvertTo444() {inputVi = 0; }
-    virtual void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env) {
-      env->ThrowError("Overlay: Unable to convert input image.");
-    }
-    virtual void ConvertImageLumaOnly(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env) {
-      env->ThrowError("Overlay: Unable to convert input image.");
-    }
-    void SetVideoInfo(VideoInfo* in_vi) {
-      inputVi = in_vi;
-    }
-};
-
-class ConvertFrom444 {
-  public:
-    ConvertFrom444() {}
-    virtual PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env) {
-      env->ThrowError("Overlay: Unable to convert output image.");
-      return 0;
-    }
-};
-
-
-class Convert444FromYV24 : public ConvertTo444 {
-public:
-  void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-  void ConvertImageLumaOnly(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444FromY8 : public ConvertTo444 {
-public:
-  void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-  void ConvertImageLumaOnly(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444FromYV12 : public ConvertTo444 {
-public:
-  void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-  void ConvertImageLumaOnly(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444FromYUY2 : public ConvertTo444 {
-public:
-  void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-  void ConvertImageLumaOnly(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444FromRGB : public ConvertTo444 {
-private:
-
-public:
-  void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-  void ConvertImageLumaOnly(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-};
-
-// Uses LumaOnly from "Convert444FromRGB"
-class Convert444NonCCIRFromRGB : public Convert444FromRGB {
-private:
-public:
-  void ConvertImage(PVideoFrame src_frame, Image444* dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444ToYV24 : public ConvertFrom444 {
-public:
-  PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444ToYV12 : public ConvertFrom444 {
-public:
-  PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444ToY8 : public ConvertFrom444 {
-public:
-  PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444ToYUY2 : public ConvertFrom444 {
-public:
-  PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444ToRGB : public ConvertFrom444 {
-public:
-  PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env);
-};
-
-class Convert444NonCCIRToRGB : public ConvertFrom444 {
-public:
-  PVideoFrame ConvertImage(Image444* src_frame, PVideoFrame dst_frame, IScriptEnvironment* env);
-};
+void Convert444FromYV16(PVideoFrame &src, PVideoFrame &dst, int pixelsize, int bits_per_pixel, IScriptEnvironment* env);
+void Convert444FromYV12(PVideoFrame &src, PVideoFrame &dst, int pixelsize, int bits_per_pixel, IScriptEnvironment* env);
+void Convert444FromYUY2(PVideoFrame &src, PVideoFrame &dst, int pixelsize, int bits_per_pixel, IScriptEnvironment* env);
+void Convert444ToYV16(PVideoFrame &src, PVideoFrame &dst, int pixelsize, int bits_per_pixel, IScriptEnvironment* env);
+void Convert444ToYV12(PVideoFrame &src, PVideoFrame &dst, int pixelsize, int bits_per_pixel, IScriptEnvironment* env);
+void Convert444ToYUY2(PVideoFrame &src, PVideoFrame &dst, int pixelsize, int bits_per_pixel, IScriptEnvironment* env);
+void ConvertYToYV12Chroma(BYTE *dst, BYTE *src, int dstpitch, int srcpitch, int pixelsize, int w, int h, IScriptEnvironment* env);
+void ConvertYToYV16Chroma(BYTE *dst, BYTE *src, int dstpitch, int srcpitch, int pixelsize, int w, int h, IScriptEnvironment* env);
 
 #endif //444Convert

@@ -39,80 +39,111 @@
 
 #include <avisynth.h>
 #include <avs/minmax.h>
+#include <avs/alignment.h>
+#include "444convert.h"
 
-class Image444 {
+class ImageOverlayInternal {
 private:
   IScriptEnvironment2 * Env;
-  BYTE* Y_plane;
-  BYTE* U_plane;
-  BYTE* V_plane;
 
-  BYTE* fake_Y_plane;
-  BYTE* fake_U_plane;
-  BYTE* fake_V_plane;
+  PVideoFrame &frame;
+
+  BYTE* origPlanes[4];
+  BYTE* fakePlanes[4];
 
   int fake_w;
   int fake_h;
   const int _w;
   const int _h;
+  const int _bits_per_pixel;
+  const bool grey;
 
   bool return_original;
 
+  const int planes_y[4] = { PLANAR_Y, PLANAR_U, PLANAR_V, PLANAR_A };
+  const int planes_r[4] = { PLANAR_G, PLANAR_B, PLANAR_R, PLANAR_A };
+  const int *planes;
 
+  int planeCount;
+  int pitches[4];
+
+  BYTE *maskChroma;
 public:
+  int xSubSamplingShifts[4];
+  int ySubSamplingShifts[4];
   int pitch;
+  int pitchUV;
+  int pitchA;
 
-  Image444(IScriptEnvironment* env) : Env(static_cast<IScriptEnvironment2*>(env)), _w(0), _h(0) {}
+  ImageOverlayInternal(
+    PVideoFrame &_frame,
+    int _inw, int _inh, VideoInfo &_workingVI, bool _hasAlpha, bool _grey, VideoInfo &_originalVI, IScriptEnvironment* env) :
+    Env(static_cast<IScriptEnvironment2*>(env)),
+    frame(_frame),
+    _w(_inw), _h(_inh), _bits_per_pixel(_workingVI.BitsPerComponent()), grey(_grey), maskChroma(nullptr) {
 
-  Image444(Image444* img, IScriptEnvironment* env) : Env(static_cast<IScriptEnvironment2*>(env)), _w(img->w()), _h(img->h()), pitch(img->pitch) {
-    Y_plane = img->GetPtr(PLANAR_Y);
-    U_plane = img->GetPtr(PLANAR_U);
-    V_plane = img->GetPtr(PLANAR_V);
-    ResetFake();
-  }
+    int pixelsize;
+    if (_bits_per_pixel == 8) pixelsize = 1;
+    else if (_bits_per_pixel <= 16) pixelsize = 2;
+    else pixelsize = 4;
 
-  Image444(int _inw, int _inh, IScriptEnvironment* env) : Env(static_cast<IScriptEnvironment2*>(env)), _w(_inw), _h(_inh) {
-    pitch = (_w+15)&(~15);
+    planeCount = _workingVI.NumComponents();
 
-    Y_plane = (BYTE*)Env->Allocate(pitch*_h, 64, AVS_POOLED_ALLOC); 
-    U_plane = (BYTE*) Env->Allocate(pitch*_h, 64, AVS_POOLED_ALLOC);
-    V_plane = (BYTE*) Env->Allocate(pitch*_h, 64, AVS_POOLED_ALLOC);
-	  if (!Y_plane || !U_plane || !V_plane) {
-	  	Env->Free(Y_plane);
-	  	Env->Free(U_plane);
-	  	Env->Free(V_plane);
-	  	Env->ThrowError("Image444: Could not reserve memory.");
-	  }
-
-    ResetFake();
-  }
-
-  Image444(BYTE* Y, BYTE* U, BYTE* V, int _inw, int _inh, int _pitch, IScriptEnvironment* env) : Env(static_cast<IScriptEnvironment2*>(env)), _w(_inw), _h(_inh) {
-    if (!(_w && _h)) {
-      _RPT0(1,"Image444: Height or Width is 0");
+    planes = (_workingVI.IsYUV() || _workingVI.IsYUVA()) ? planes_y : planes_r;
+    for (int p = 0; p < 4; p++) {
+      xSubSamplingShifts[p] = ySubSamplingShifts[p] = 0;
+      pitches[p] = 0;
     }
-    Y_plane = Y;
-    U_plane = U;
-    V_plane = V;
-    pitch = _pitch;
-    ResetFake();
-  }
 
-  void free_chroma() {
-    Env->Free(U_plane);
-    Env->Free(V_plane);
-  }
-
-  void free_luma() {
-    Env->Free(Y_plane);
-  }
-
-  void free_all() {
-    if (!(_w && _h)) {
-      _RPT0(1,"Image444: Height or Width is 0");
+    for (int p = 0; p < planeCount; ++p) {
+      const int plane = planes[p];
+      xSubSamplingShifts[p] = _workingVI.GetPlaneWidthSubsampling(plane);
+      ySubSamplingShifts[p] = _workingVI.GetPlaneHeightSubsampling(plane);
+      pitches[p] = frame->GetPitch(plane);
     }
-    free_luma();
-    free_chroma();
+
+    // allocate extra chroma and set chroma pitches for greymask mode
+    if (grey) {
+      if (_workingVI.Is420() || _workingVI.Is422()) {
+        // allocate for subSampled chroma when original mask is grey (Y only)
+        int tmppitch = AlignNumber((_w >> xSubSamplingShifts[1])*pixelsize, FRAME_ALIGN);
+        maskChroma = static_cast<BYTE*>(Env->Allocate(
+          tmppitch * (_h >> ySubSamplingShifts[1]), 64, AVS_POOLED_ALLOC)
+          );
+        pitches[1] = pitches[2] = tmppitch;
+      }
+      else {
+        pitches[1] = pitches[2] = pitches[0];
+      }
+    }
+
+    // temporarily. so far only blend is ported to arrays
+    pitch = pitches[0];
+    pitchUV = pitches[1];
+    pitchA = pitches[3];
+
+    for (int p = 0; p < planeCount; p++)
+      origPlanes[p] = (BYTE*)frame->GetReadPtr(planes[p]);
+    if (grey) {
+      if (_workingVI.Is420()) {
+        // resize Y-only mask to 4:2:0 chroma
+        ConvertYToYV12Chroma(maskChroma, origPlanes[0], pitches[1], pitches[0], pixelsize, _w >> xSubSamplingShifts[1], _h >> ySubSamplingShifts[1], Env);
+        origPlanes[1] = origPlanes[2] = maskChroma;
+      }
+      else if (_workingVI.Is422()) {
+        // resize Y-only mask to 4:2:2 chroma
+        ConvertYToYV16Chroma(maskChroma, origPlanes[0], pitches[1], pitches[0], pixelsize, _w >> xSubSamplingShifts[1], _h >> ySubSamplingShifts[1], Env);
+        origPlanes[1] = origPlanes[2] = maskChroma;
+      }
+      else {
+        // UV = Y plane pointer
+        origPlanes[1] = origPlanes[2] = origPlanes[0];
+        xSubSamplingShifts[1] = xSubSamplingShifts[2] = 0;
+        ySubSamplingShifts[1] = ySubSamplingShifts[2] = 0;
+      }
+    }
+
+    ResetFake();
   }
 
   __inline int w() { return (return_original) ? _w : fake_w; }
@@ -124,15 +155,34 @@ public:
     }
     switch (plane) {
       case PLANAR_Y:
-        return (return_original) ? Y_plane : fake_Y_plane;
+        return (return_original) ? origPlanes[0] : fakePlanes[0];
       case PLANAR_U:
-        return (return_original) ? U_plane : fake_U_plane;
+        return (return_original) ? origPlanes[1] : fakePlanes[1];
       case PLANAR_V:
-        return (return_original) ? V_plane : fake_V_plane;
+        return (return_original) ? origPlanes[2] : fakePlanes[2];
+      case PLANAR_A:
+        return (return_original) ? origPlanes[3] : fakePlanes[3];
     }
-    return Y_plane;
+    return origPlanes[0];
   }
 
+  int GetPitchByIndex(int planeIndex) {
+    if (planeIndex>=0 && planeIndex <=3)
+      return pitches[planeIndex];
+    return pitches[0]; // Y
+  }
+
+
+  BYTE* GetPtrByIndex(int planeIndex) {
+    if (!(_w && _h)) {
+      _RPT0(1,"Image444: Height or Width is 0");
+    }
+    if (planeIndex>=0 && planeIndex <=3)
+      return (return_original) ? origPlanes[planeIndex] : fakePlanes[planeIndex];
+    return origPlanes[0]; // Y
+  }
+
+  /*
   void SetPtr(BYTE* ptr, int plane) {
     if (!(_w && _h)) {
       _RPT0(1,"Image444: Height or Width is 0");
@@ -147,17 +197,57 @@ public:
       case PLANAR_V:
         fake_Y_plane = V_plane = ptr;
         break;
+      case PLANAR_A:
+        fake_A_plane = A_plane = ptr;
+        break;
     }
+  }
+  */
+  void SetPtrByIndex(BYTE* ptr, int planeIndex) {
+    if (!(_w && _h)) {
+      _RPT0(1,"Image444: Height or Width is 0");
+    }
+    if (planeIndex >= 0 && planeIndex <= 3)
+      origPlanes[planeIndex] = fakePlanes[planeIndex] = ptr;
+  }
+
+
+  int GetPitch(int plane) {
+    if (!(_w && _h)) {
+      _RPT0(1,"Image444: Height or Width is 0");
+    }
+    switch (plane) {
+    case PLANAR_Y:
+    case PLANAR_G:
+    case PLANAR_B:
+    case PLANAR_R:
+      return pitch;
+    case PLANAR_U:
+    case PLANAR_V:
+      return pitchUV;
+    case PLANAR_A:
+      return pitchA;
+    }
+    return pitch;
   }
 
   void SubFrame(int x, int y, int new_w, int new_h) {
     new_w = min(new_w, w()-x);
     new_h = min(new_h, h()-y);
 
-    fake_Y_plane = GetPtr(PLANAR_Y) + x + (y*pitch);
-    fake_U_plane = GetPtr(PLANAR_U) + x + (y*pitch);
-    fake_V_plane = GetPtr(PLANAR_V) + x + (y*pitch);
-    
+    int pixelsize;
+    switch(_bits_per_pixel) {
+    case 8: pixelsize = 1; break;
+    case 32: pixelsize = 4; break;
+    default: pixelsize = 2;
+    }
+
+    for (int p = 0; p < 3; p++)
+    {
+      fakePlanes[p] = GetPtrByIndex(p) + (x >> xSubSamplingShifts[p]) * pixelsize + (y >> ySubSamplingShifts[p]) * pitches[p];
+    }
+    fakePlanes[3] = pitches[3] > 0 ? (GetPtrByIndex(3) + (x >> xSubSamplingShifts[3])*pixelsize + (y >> ySubSamplingShifts[3])*pitches[3]) : nullptr;
+
     fake_w = new_w;
     fake_h = new_h;
   }
@@ -165,7 +255,7 @@ public:
   bool IsSizeZero() {
     if (w()<=0) return true;
     if (h()<=0) return true;
-    if (!(pitch && Y_plane && V_plane && U_plane)) return true;
+    if (!(pitch && origPlanes[0])) return true;
     return false;
   }
 
@@ -175,11 +265,15 @@ public:
 
   void ResetFake() {
     return_original = true;
-    fake_Y_plane = Y_plane;
-    fake_U_plane = U_plane;
-    fake_V_plane = V_plane;
+    for (int i = 0; i < 4; i++)
+      fakePlanes[i] = origPlanes[i];
     fake_w = _w;
     fake_h = _h;
+  }
+
+  ~ImageOverlayInternal() {
+    if(maskChroma)
+      Env->Free(maskChroma);
   }
 
 };
