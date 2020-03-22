@@ -45,11 +45,11 @@
 #endif
 
 MTGuard::MTGuard(PClip firstChild, MtMode mtmode, std::unique_ptr<const FilterConstructor> &&funcCtor, InternalEnvironment* env) :
+  Env(env),
   FilterMutex(NULL),
-  MTMode(mtmode),
   nThreads(1),
   FilterCtor(std::move(funcCtor)),
-  Env(env)
+  MTMode(mtmode)
 {
   assert( ((int)mtmode > (int)MT_INVALID) && ((int)mtmode < (int)MT_MODE_COUNT) );
 
