@@ -291,7 +291,7 @@ public:
     core->ApplyMessage(frame, vi, message, size, textcolor, halocolor, bgcolor);
   }
 
-  const AVS_Linkage* const __stdcall GetAVSLinkage()
+  const AVS_Linkage* __stdcall GetAVSLinkage()
   {
     return core->GetAVSLinkage();
   }

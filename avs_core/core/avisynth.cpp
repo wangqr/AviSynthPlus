@@ -768,7 +768,7 @@ public:
   PVideoFrame __stdcall SubframePlanar(PVideoFrame src, int rel_offset, int new_pitch, int new_row_size, int new_height, int rel_offsetU, int rel_offsetV, int new_pitchUV);
   void __stdcall DeleteScriptEnvironment();
   void __stdcall ApplyMessage(PVideoFrame* frame, const VideoInfo& vi, const char* message, int size, int textcolor, int halocolor, int bgcolor);
-  const AVS_Linkage* const __stdcall GetAVSLinkage();
+  const AVS_Linkage* __stdcall GetAVSLinkage();
   AVSValue __stdcall GetVarDef(const char* name, const AVSValue& def = AVSValue());
 
   // alpha support
@@ -3270,7 +3270,7 @@ extern void ApplyMessage(PVideoFrame* frame, const VideoInfo& vi,
   IScriptEnvironment* env);
 
 
-const AVS_Linkage* const __stdcall ScriptEnvironment::GetAVSLinkage() {
+const AVS_Linkage* __stdcall ScriptEnvironment::GetAVSLinkage() {
   extern const AVS_Linkage* const AVS_linkage; // In interface.cpp
 
   return AVS_linkage;

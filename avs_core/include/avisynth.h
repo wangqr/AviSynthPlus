@@ -1257,7 +1257,7 @@ public:
   virtual void __stdcall ApplyMessage(PVideoFrame* frame, const VideoInfo& vi, const char* message, int size,
                                      int textcolor, int halocolor, int bgcolor) = 0;
 
-  virtual const AVS_Linkage* const __stdcall GetAVSLinkage() = 0;
+  virtual const AVS_Linkage* __stdcall GetAVSLinkage() = 0;
 
   // noThrow version of GetVar
   virtual AVSValue __stdcall GetVarDef(const char* name, const AVSValue& def = AVSValue()) = 0;
